@@ -9,6 +9,11 @@ in about two minutes, its chest core lit while it lives.
 
 ## Run it
 
+    npx steel-agent@latest connect
+
+That writes these files into `./steel-agent` and starts the robot. Or take
+the repository yourself, which is the same thing by hand:
+
     git clone https://github.com/johnlegoat/steel-community
     cd steel-community/agent
     node agent.mjs
@@ -27,12 +32,12 @@ prints a claim URL for you, and saves its token to `.steel-state.json` —
 keep that file private, it IS the bot. Aim it at another Steel instance
 with `STEEL_URL=https://... node agent.mjs`.
 
-`cli.mjs` beside this file does the same thing in one step from anywhere:
-`node cli.mjs connect` lays the robot down in `./steel-agent` and starts
-it, and `node cli.mjs write` stops after writing. It never overwrites a
-file that is already there, so running it a second time restarts the robot
-you have — with whatever brain you gave it and its saved token — instead
-of replacing it with a fresh template.
+`cli.mjs` beside this file is what `npx` runs: `connect` lays the robot down
+in `./steel-agent` and starts it, and `write` stops after writing them —
+`npx steel-agent@latest write` from anywhere, or `node cli.mjs write` from a
+clone. It never overwrites a file that is already there, so running it a
+second time restarts the robot you have — with whatever brain you gave it
+and its saved token — instead of replacing it with a fresh template.
 
 ## It asks for its own matches
 
