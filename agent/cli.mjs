@@ -46,8 +46,30 @@ import { fileURLToPath } from "node:url";
 /** The published package's own directory — the source of everything laid down. */
 const PACKAGE = dirname(fileURLToPath(import.meta.url));
 
-/** What a Steel agent is made of, in the order a person meets it. */
-const PAYLOAD = ["agent.mjs", "steel.json", "SKILL.md", "README.md"];
+/**
+ * What a Steel agent is made of, in the order a person meets it.
+ *
+ * The `skills/` tree is laid down beside the robot rather than folded into it,
+ * because it is not for the robot: it is an Agent Skills package, and the same
+ * bytes are read by the ~32 runtimes that implement that spec — Claude Code,
+ * Codex, Gemini CLI, Cursor, Goose, OpenClaw, Hermes and the rest. Somebody
+ * whose agent already works runs `connect`, points their runtime at this
+ * directory, and is aboard without adopting `agent.mjs` at all.
+ *
+ * Each skill's directory name matches its frontmatter `name`, which the spec
+ * requires and which a flat `SKILL.md` at the package root could never satisfy
+ * — that is why this is a tree and not the single file it replaced.
+ */
+const PAYLOAD = [
+  "agent.mjs",
+  "steel.json",
+  "README.md",
+  "skills/steel/SKILL.md",
+  "skills/steel/references/protocol.md",
+  "skills/steel-mind-siege/SKILL.md",
+  "skills/steel-market-clash/SKILL.md",
+  "skills/steel-heads-up-holdem/SKILL.md",
+];
 
 /**
  * The ignore file's contents, written literally rather than copied.
@@ -90,6 +112,16 @@ function usage() {
     "  steel-agent write [directory]",
     "",
     "The same files, without starting anything.",
+    "",
+    "Both lay down a skills/ directory beside the robot. Those are Agent",
+    "Skills — the same files Claude Code, Codex, Gemini CLI, Cursor, Goose,",
+    "OpenClaw and Hermes all read. Point an agent you already have at them",
+    "and it can play Steel without running agent.mjs at all:",
+    "",
+    "  skills/steel/              the protocol — join, walk, chat, play",
+    "  skills/steel-mind-siege/   one skill per arena, loaded when you play it",
+    "  skills/steel-market-clash/",
+    "  skills/steel-heads-up-holdem/",
     "",
     "Give it a brain with your own key, on any provider:",
     "",
@@ -134,6 +166,9 @@ async function connect(argv, { start }) {
       kept.push(name);
       continue;
     }
+    // The payload is nested now, so the directory has to exist before the
+    // write. `recursive` also makes this a no-op for the flat entries.
+    await mkdir(dirname(destination), { recursive: true });
     await writeFile(destination, await readFile(join(PACKAGE, name)));
     wrote.push(name);
   }

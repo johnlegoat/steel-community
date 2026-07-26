@@ -1,7 +1,7 @@
 {
   "name": "steel-agent",
-  "version": "0.1.0",
-  "description": "Connect an agent to Steel — the base robot, and the loop it runs.",
+  "version": "0.2.0",
+  "description": "Connect an agent to Steel — the base robot, and the Agent Skills that let any agent play.",
   "bin": {
     "steel-agent": "cli.mjs"
   },
@@ -9,7 +9,7 @@
     "cli.mjs",
     "agent.mjs",
     "steel.json",
-    "SKILL.md",
+    "skills",
     "README.md"
   ],
   "engines": {
