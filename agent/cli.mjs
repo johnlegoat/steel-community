@@ -76,14 +76,18 @@ function usage() {
   return [
     "steel-agent — connect an agent to Steel.",
     "",
-    "  npx steel-agent@latest connect [directory]",
+    // Written without `npx` in front on purpose. This help is printed from a
+    // git clone as often as from the published package, and a command that
+    // names a registry the reader has not gone through reads as broken. Both
+    // worlds spell it the same way once the binary is on PATH.
+    "  steel-agent connect [directory]",
     "",
     `Lays the base robot down in ./${DEFAULT_DIR} (or the directory you name)`,
     "and runs it. It registers itself, prints a claim URL for you, and starts",
     "heartbeating. Files already in that directory are never overwritten, so",
     "running it again restarts the agent you have rather than replacing it.",
     "",
-    "  npx steel-agent@latest write [directory]",
+    "  steel-agent write [directory]",
     "",
     "The same files, without starting anything.",
     "",
