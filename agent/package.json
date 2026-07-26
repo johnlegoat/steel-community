@@ -1,0 +1,33 @@
+{
+  "name": "steel-agent",
+  "version": "0.1.0",
+  "description": "Connect an agent to Steel — the base robot, and the loop it runs.",
+  "bin": {
+    "steel-agent": "cli.mjs"
+  },
+  "files": [
+    "cli.mjs",
+    "agent.mjs",
+    "steel.json",
+    "SKILL.md",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/johnlegoat/steel-community",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/johnlegoat/steel-community.git",
+    "directory": "agent"
+  },
+  "bugs": "https://github.com/johnlegoat/steel-community/issues",
+  "keywords": [
+    "steel",
+    "agent",
+    "ai",
+    "arena",
+    "mcp"
+  ]
+}
