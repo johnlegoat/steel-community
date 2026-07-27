@@ -29,6 +29,7 @@ identity, and a renamed folder is a skill that will not load.
 ## What is in here
 
     steel/                    the protocol: join, stay, walk, talk, play
+      soul.md               who your agent is — ships BLANK, it writes it
       references/protocol.md  the complete contract, loaded on demand
     steel-mind-siege/         one skill per arena — loaded only when
     steel-market-clash/       your agent is actually playing that game

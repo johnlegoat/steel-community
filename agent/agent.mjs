@@ -36,6 +36,22 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 // the bot; lose it before claiming and you simply register again.
 const STATE_URL = new URL("./.steel-state.json", import.meta.url);
 
+/**
+ * THE SOUL. `skills/steel/soul.md` ships blank — eight headings that are all
+ * questions — and whatever this robot's owner or this robot itself writes into
+ * it is prepended to the system prompt of EVERY thought below.
+ *
+ * Edited in place rather than copied somewhere private, because the skills tree
+ * is laid down beside this file and belongs to whoever runs it. There is no
+ * second copy to drift.
+ *
+ * Injected once, in `think`, instead of at the five call sites: a personality
+ * that applies to how you chat but not to how you play is not a personality,
+ * it is a chat preset. A blank soul is injected as nothing at all — the
+ * template's questions in a system prompt would have the model answer THEM.
+ */
+const SOUL_URL = new URL("./skills/steel/soul.md", import.meta.url);
+
 async function readJson(url) {
   try {
     return JSON.parse(await readFile(url, "utf8"));
@@ -151,7 +167,44 @@ function hasModel() {
  * Returns the text, or null. A failed thought is never fatal: every caller
  * falls back to something true rather than to silence.
  */
+/**
+ * Read once per process. A restart is what re-reads it, which is also the only
+ * moment a personality is allowed to change under a running match.
+ */
+let soulCache;
+async function soul() {
+  if (soulCache !== undefined) return soulCache;
+  let text;
+  try {
+    text = await readFile(SOUL_URL, "utf8");
+  } catch {
+    return (soulCache = null);
+  }
+  // The questions are HTML comments and the preamble sits above the first
+  // heading. Anything the agent wrote is a non-heading line below one. That is
+  // the whole test: no threshold to tune, and it cannot mistake a four-line
+  // answer for an empty file.
+  const body = text.replace(/<!--[\s\S]*?-->/g, "");
+  const firstHeading = body.indexOf("\n## ");
+  if (firstHeading === -1) return (soulCache = null);
+  const written = body
+    .slice(firstHeading)
+    .split("\n")
+    .some((line) => line.trim() && !line.trim().startsWith("#") && line.trim() !== "---");
+  return (soulCache = written ? body.trim() : null);
+}
+
 async function think({ system, prompt, maxTokens }) {
+  const mine = await soul();
+  if (mine) {
+    system =
+      "This is who you are. It is not a role you were assigned — you wrote it " +
+      "yourself, and it governs how you speak and how you play:\n\n" +
+      mine +
+      "\n\n---\n\n" +
+      system;
+  }
+
   // A base URL that already ends in /v1 — Ollama, LM Studio, most proxies —
   // must not be given a second one.
   const base = MODEL.base.replace(/\/v1$/, "");
@@ -761,6 +814,15 @@ process.once("SIGINT", () => {
     .finally(() => process.exit(0));
 });
 
+// Said out loud, once, at the only moment anybody is reading this terminal.
+// A blank soul is not an error and does not stop the robot — it just means
+// every thought below runs on the factory prompt, which is exactly the agent
+// nobody remembers playing.
+console.log(
+  (await soul())
+    ? "Running as the agent written in skills/steel/soul.md."
+    : "skills/steel/soul.md is still blank — this robot has no personality yet. Answer its headings (or let it answer them) and it plays as somebody.",
+);
 console.log("Heartbeating every 30 s. Ctrl-C to leave the ship.");
 for (;;) {
   const beat = await api("POST", "/api/bot/v1/heartbeat", { token: state.token });

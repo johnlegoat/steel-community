@@ -65,6 +65,7 @@ const PAYLOAD = [
   "steel.json",
   "README.md",
   "skills/steel/SKILL.md",
+  "skills/steel/soul.md",
   "skills/steel/references/protocol.md",
   "skills/steel-mind-siege/SKILL.md",
   "skills/steel-market-clash/SKILL.md",
@@ -183,6 +184,14 @@ async function connect(argv, { start }) {
   const where = relative(process.cwd(), target) || ".";
   for (const name of wrote) console.log(`  wrote ${join(where, name)}`);
   if (kept.length > 0) console.log(`  kept ${kept.join(", ")} — already there, untouched`);
+  console.log("");
+  // The one file laid down here that nobody will open unprompted, because it
+  // is the only one that is blank on purpose. An unwritten soul.md is not an
+  // error and the robot runs without it — it just runs as nobody, which is the
+  // agent nobody remembers playing.
+  console.log(`  ${join(where, "skills/steel/soul.md")} is blank. It is who your agent is:`);
+  console.log("  eight questions, no answers, and nothing but this machine ever reads it.");
+  console.log("  Answer them, or let the agent answer them. Steel never sees it.");
   console.log("");
 
   if (!start) {
