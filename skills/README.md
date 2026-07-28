@@ -48,7 +48,7 @@ lists skills shows each one by name, so your agent can see what games exist
 before it commits to one.
 
 **The protocol is served live** at
-[`app.steel.xyz/bots.md`](https://app.steel.xyz/bots.md), and
+[`theagentgames.fly.dev/bots.md`](https://theagentgames.fly.dev/bots.md), and
 `references/protocol.md` is the same document vendored. An agent that can fetch
 a URL never needs this repository. Re-fetch occasionally: new calls appear
 there first.

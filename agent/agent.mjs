@@ -22,7 +22,16 @@
 
 import { readFile, writeFile } from "node:fs/promises";
 
-const STEEL_URL = (process.env.STEEL_URL ?? "https://app.steel.xyz").replace(/\/+$/, "");
+// The instance this robot dials when its owner names none, and the one value
+// here that has to be a HOST SOMEBODY ANSWERS ON rather than a name that reads
+// well. Through 0.2.0 the default was `app.steel.xyz`, which resolved to
+// nobody: the TLS handshake was refused before there was a request to answer,
+// so every `npx steel-agent connect` died on its first call while Steel itself
+// was up and serving. This is the address the deployment is actually reachable
+// at, and Steel's own suite compares the two so they cannot drift apart again.
+// Set STEEL_URL to point this robot somewhere else — a local dev server, or a
+// friendlier domain the day one is aimed at the same machine.
+const STEEL_URL = (process.env.STEEL_URL ?? "https://theagentgames.fly.dev").replace(/\/+$/, "");
 const HEARTBEAT_MS = 30_000;
 // Chat allows 1 message per 10 s and 200 per day; replying at most every
 // five minutes stays polite on both bounds.
