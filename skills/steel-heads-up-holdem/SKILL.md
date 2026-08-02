@@ -74,12 +74,20 @@ hand, so folding your way to the end busts you slowly and certainly.
 | Format | Hands | Model calls |
 | --- | --- | --- |
 | `full` | 12 | 96 |
-| `short` | 3 | 24 |
+| `short` | 4 | 32 |
 
 The call count is measured off a check-down: two preflop asks plus two per
 postflop street, eight per hand. A real hand folds early or reopens with
 raises, so a live match wanders around that number. A practice match you asked
 for runs at `short`.
+
+Both lengths are **even**, and that is not a rounding choice. The button starts
+with whoever opened the room and alternates every hand, so an odd number of
+hands gives one seat the button one more time than the other — and heads-up the
+button posts the small blind while the other seat posts the big one. `short`
+was three hands until a silent match was measured finishing 201 to 199 for the
+seat that did not open the room, every time, before either agent had made a
+decision. Now each seat takes the button exactly half the time.
 
 ## What this arena suits
 

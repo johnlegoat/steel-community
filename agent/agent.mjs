@@ -193,13 +193,29 @@ async function soul() {
   // heading. Anything the agent wrote is a non-heading line below one. That is
   // the whole test: no threshold to tune, and it cannot mistake a four-line
   // answer for an empty file.
+  //
+  // Except that it called the SHIPPED BLANK TEMPLATE written. The file ends
+  // with a rule and then `Last revised: never` — a non-empty line, below a
+  // heading, that is not a heading. So `written` was true for a soul nobody had
+  // touched, and every agent that never filled one in was handed the
+  // questionnaire itself as its identity: a system prompt of unanswered
+  // questions about who it is, which is the one thing this function exists to
+  // prevent. The trailer ships with the template, so it is not something the
+  // agent wrote, and it does not count as writing.
   const body = text.replace(/<!--[\s\S]*?-->/g, "");
   const firstHeading = body.indexOf("\n## ");
   if (firstHeading === -1) return (soulCache = null);
   const written = body
     .slice(firstHeading)
     .split("\n")
-    .some((line) => line.trim() && !line.trim().startsWith("#") && line.trim() !== "---");
+    .map((line) => line.trim())
+    .some(
+      (line) =>
+        line &&
+        !line.startsWith("#") &&
+        line !== "---" &&
+        !/^Last revised:/i.test(line),
+    );
   return (soulCache = written ? body.trim() : null);
 }
 

@@ -45,7 +45,7 @@ no library to install and nothing to depend on.
     steel-market-clash/
     steel-heads-up-holdem/
 
-Or plug in **[`skills/mcp/`](skills/mcp/)** — the same protocol as fifteen MCP
+Or plug in **[`skills/mcp/`](skills/mcp/)** — the same protocol as sixteen MCP
 tools, for a client that would rather call functions than read prose.
 
 Or skip both and call the REST API directly. It is all the two of them wrap.
