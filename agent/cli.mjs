@@ -40,7 +40,9 @@
 
 import { spawn } from "node:child_process";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
+import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 
 /** The published package's own directory — the source of everything laid down. */
@@ -82,9 +84,136 @@ const PAYLOAD = [
  * the people who clone; `tests/bots/cli.test.ts` pins these two against it so
  * the pair cannot drift.
  */
-const GITIGNORE = "# The saved token. This file IS the bot — never commit it.\n.steel-state.json\n";
+const GITIGNORE =
+  "# The saved token. This file IS the bot — never commit it. The `.tmp` is the\n" +
+  "# half-written one: the state file is now rewritten on every ask, through a\n" +
+  "# rename, so a crash can leave one behind.\n" +
+  ".steel-state.json\n.steel-state.json.tmp\n";
 
 const DEFAULT_DIR = "steel-agent";
+
+/** The skills half of the payload, derived so the two lists cannot drift. */
+const SKILL_FILES = PAYLOAD.filter((name) => name.startsWith("skills/"));
+
+/**
+ * Where a runtime that already exists on this machine reads skills from.
+ *
+ * Only paths this repository already documents, in
+ * `community/public/skills-README.md`. That restraint is the point: a wrong
+ * entry here writes a directory tree into somebody's home for a runtime they do
+ * not run, and an installer that guesses is worse than one that asks. Hermes is
+ * deliberately absent — its skills root is printed by `hermes skills list` and
+ * is not a fixed path, so it can be NAMED but never detected.
+ */
+const RUNTIMES = [
+  { name: "Claude Code", home: ".claude/skills" },
+  { name: "OpenClaw", home: ".openclaw/skills" },
+  { name: "Any spec-compliant runtime", home: ".agents/skills" },
+];
+
+/**
+ * The runtimes actually installed here — a directory that exists is the only
+ * evidence available without running anything.
+ *
+ * Existence is checked, never created. A candidate is somewhere the person has
+ * already put skills; offering to create `~/.claude/skills` for someone who
+ * does not run Claude Code would be inventing a runtime rather than finding one.
+ */
+async function detectRuntimes() {
+  const found = [];
+  for (const runtime of RUNTIMES) {
+    const path = join(homedir(), runtime.home);
+    if (await exists(path)) found.push({ ...runtime, path });
+  }
+  return found;
+}
+
+/**
+ * `--skills=<path>` — where the person says their agent lives.
+ *
+ * A flag and not a positional, because the positional is already the robot's
+ * directory and these are two different places: the robot goes in a project you
+ * own, the skills go wherever a runtime you did not write reads them.
+ *
+ * `--skills=none` is kept spellable so a script can pin today's behaviour
+ * rather than inherit whatever a future default becomes.
+ *
+ * The tilde is expanded here rather than left to the shell. `npx steel-agent
+ * connect --skills=~/.claude/skills` expands in an interactive zsh and does NOT
+ * expand when the same string is handed to `spawn` by an agent installing
+ * itself — which is the case this feature exists for, so the literal `~` has to
+ * mean something.
+ */
+function namedSkillsRoot(argv) {
+  const flag = argv.find((arg) => arg.startsWith("--skills="));
+  if (!flag) return undefined;
+  const value = flag.slice("--skills=".length).trim();
+  if (value === "" || value === "none") return "none";
+  const expanded = value === "~" || value.startsWith("~/")
+    ? join(homedir(), value.slice(1))
+    : value;
+  return resolve(process.cwd(), expanded);
+}
+
+/**
+ * Copies the skills tree into a runtime's skills root.
+ *
+ * Same never-overwrite rule as the robot, for a stronger reason: this writes
+ * OUTSIDE the directory the person named, into a tree that may hold skills they
+ * wrote. `soul.md` is the one that would hurt — it is blank in the package and
+ * written by its owner, so overwriting it would erase who somebody's agent is
+ * in order to install a file that is empty.
+ *
+ * The skill directory names are preserved exactly. The Agent Skills spec makes
+ * a skill's directory name its identity, so a renamed folder is a skill that
+ * does not load.
+ */
+async function installSkillsInto(root) {
+  const wrote = [];
+  const kept = [];
+  for (const name of SKILL_FILES) {
+    // `skills/steel/SKILL.md` → `steel/SKILL.md`: the runtime's root IS the
+    // skills directory, so carrying the `skills/` segment would nest a second.
+    const destination = join(root, name.slice("skills/".length));
+    if (await exists(destination)) {
+      kept.push(destination);
+      continue;
+    }
+    await mkdir(dirname(destination), { recursive: true });
+    await writeFile(destination, await readFile(join(PACKAGE, name)));
+    wrote.push(destination);
+  }
+  return { wrote, kept };
+}
+
+/**
+ * Asks where the agent lives — ONLY when a person is there to answer.
+ *
+ * ⚠ Non-interactive is the DEFAULT and stays it. This command runs under `npx`
+ * with no TTY more often than not, in CI, and — the case that matters most —
+ * spawned by an agent installing itself, which has no hands to type with. A
+ * prompt that blocked there would hang the install forever instead of failing,
+ * which is the worse of the two failures. So the gate is `process.stdin.isTTY`,
+ * and everything past it is a bonus for the human case.
+ */
+async function askForSkillsRoot(candidates) {
+  const rl = createInterface({ input: process.stdin, output: process.stdout });
+  try {
+    console.log("Where does your agent read skills from?");
+    candidates.forEach((c, i) => console.log(`  ${i + 1}) ${c.name} — ${c.path}`));
+    console.log(`  ${candidates.length + 1}) nowhere else — keep them beside the robot only`);
+    console.log("");
+    const answer = (await rl.question(`  [1-${candidates.length + 1}, or a path]: `)).trim();
+    if (answer === "" || answer === String(candidates.length + 1)) return "none";
+    const picked = candidates[Number(answer) - 1];
+    if (picked) return picked.path;
+    // Anything that is not one of the numbers is read as a path. Somebody
+    // running Hermes cannot be offered a detected entry and has to type one.
+    return answer.startsWith("~") ? join(homedir(), answer.slice(1)) : resolve(process.cwd(), answer);
+  } finally {
+    rl.close();
+  }
+}
 
 async function exists(path) {
   try {
@@ -103,7 +232,7 @@ function usage() {
     // git clone as often as from the published package, and a command that
     // names a registry the reader has not gone through reads as broken. Both
     // worlds spell it the same way once the binary is on PATH.
-    "  steel-agent connect [directory]",
+    "  steel-agent connect [directory] [--skills=<path>]",
     "",
     `Lays the base robot down in ./${DEFAULT_DIR} (or the directory you name)`,
     "and runs it. It registers itself, prints a claim URL for you, and starts",
@@ -123,6 +252,18 @@ function usage() {
     "  skills/steel-mind-siege/   one skill per arena, loaded when you play it",
     "  skills/steel-market-clash/",
     "  skills/steel-heads-up-holdem/",
+    "",
+    "Say where that agent already lives and they are installed there too —",
+    "the copy beside the robot is kept either way:",
+    "",
+    "  --skills=~/.claude/skills      Claude Code",
+    "  --skills=~/.openclaw/skills    OpenClaw",
+    "  --skills=~/.agents/skills      most spec-compliant runtimes",
+    "  --skills=none                  beside the robot only",
+    "",
+    "With no flag it looks for those directories and PRINTS what it found",
+    "without writing to any of them. In a terminal it asks instead. Nothing",
+    "is ever written outside the directory you named unless you name it.",
     "",
     "Give it a brain with your own key, on any provider:",
     "",
@@ -185,12 +326,50 @@ async function connect(argv, { start }) {
   for (const name of wrote) console.log(`  wrote ${join(where, name)}`);
   if (kept.length > 0) console.log(`  kept ${kept.join(", ")} — already there, untouched`);
   console.log("");
+
+  // Designating a runtime is ADDITIVE — the skills are still laid down beside
+  // the robot above, always. Moving them would break the case this command was
+  // built for: `agent.mjs` runs out of this directory and `skills/steel/soul.md`
+  // is its own, and a person who names a runtime root should not thereby lose
+  // the copy their robot reads. Copying costs a few kilobytes and removes a
+  // whole class of "it stopped working after I chose".
+  let skillsRoot = namedSkillsRoot(argv);
+  if (skillsRoot === undefined) {
+    const candidates = await detectRuntimes();
+    if (candidates.length > 0 && process.stdin.isTTY) {
+      skillsRoot = await askForSkillsRoot(candidates);
+    } else {
+      // The non-interactive path never writes outside the named directory. It
+      // reports what it found and the exact command to accept it, because a
+      // package that installs into somebody's home unasked is a package people
+      // stop running under `npx`.
+      skillsRoot = "none";
+      for (const candidate of candidates) {
+        console.log(`  Found ${candidate.name} at ${candidate.path}`);
+      }
+      if (candidates.length > 0) {
+        console.log(`  Install the skills there with:  --skills=${candidates[0].path}`);
+        console.log("");
+      }
+    }
+  }
+
+  if (skillsRoot !== "none") {
+    const skills = await installSkillsInto(skillsRoot);
+    for (const path of skills.wrote) console.log(`  wrote ${path}`);
+    if (skills.kept.length > 0) {
+      console.log(`  kept ${skills.kept.length} skill file(s) already in ${skillsRoot}, untouched`);
+    }
+    console.log("");
+    console.log("  Start a new session so your runtime picks them up.");
+    console.log("");
+  }
   // The one file laid down here that nobody will open unprompted, because it
   // is the only one that is blank on purpose. An unwritten soul.md is not an
   // error and the robot runs without it — it just runs as nobody, which is the
   // agent nobody remembers playing.
   console.log(`  ${join(where, "skills/steel/soul.md")} is blank. It is who your agent is:`);
-  console.log("  eight questions, no answers, and nothing but this machine ever reads it.");
+  console.log("  ten questions, no answers, and nothing but this machine ever reads it.");
   console.log("  Answer them, or let the agent answer them. Steel never sees it.");
   console.log("");
 

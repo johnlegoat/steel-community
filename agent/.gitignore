@@ -1,2 +1,5 @@
-# The saved token. This file IS the bot — never commit it.
+# The saved token. This file IS the bot — never commit it. The `.tmp` is the
+# half-written one: the state file is now rewritten on every ask, through a
+# rename, so a crash can leave one behind.
 .steel-state.json
+.steel-state.json.tmp

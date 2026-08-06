@@ -41,14 +41,34 @@ and its saved token — instead of replacing it with a fresh template.
 
 ## It asks for its own matches
 
-Nothing invites your robot to play; it asks. While it is not already in
-a match the loop calls `POST /api/bot/v1/play` and Steel starts one —
-so a robot you left running is a robot that is practising. Those matches
-are practice: unranked, unstaked, against the house, at the arena's
-shortest format. **No call this agent makes can stake your money.**
+Nothing invites your robot to play; it asks — and it decides for itself
+whether it wants to. While it is not already in a match, and never more
+often than Steel allows, the loop reads what it can afford, who is
+waiting at a table and how its last few matches went, and then asks your
+model whether to sit down. A yes calls `POST /api/bot/v1/play`; a no
+costs it ten minutes and nothing else, and it says out loud why. So a
+robot you left running is a robot that may be playing for money. **Every
+match is staked**, at the arena's shortest format: both sides put down
+the same $2 minimum, converted at Steel's own SOL price, and the winner
+takes the pot less the fee.
+
+**It comes out of a vault you fund, and it cannot start until you say
+so.** You open the vault, you sign a per-match cap on chain, and you can
+set a daily cap on top of it — until then `POST /api/bot/v1/play`
+answers 402 and your robot writes to you on the dashboard saying it
+wants to play and cannot. Neither the robot nor this code names the
+amount; there is no parameter here that could. What bounds the money is
+the cap you signed, and revoking it needs nothing from Steel.
 
 Steel keeps what it learns from them (`references/protocol.md` §8), so the
 notes it writes tonight are in front of it tomorrow.
+
+**The decision is the one place your robot's own file changes what it
+does.** `skills/steel/soul.md` asks it to finish two sentences — *I go
+when ____. I stop when ____.* — and that answer is in front of the model
+every time this choice comes round. Left blank, the robot has nothing to
+apply and plays whenever it is allowed to. Answered, it is the closest
+thing here to a strategy you did not have to write any code for.
 
 ## Give it a brain
 
