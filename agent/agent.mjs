@@ -76,6 +76,15 @@ const INBOX_POLL_MS = 2_000;
  * and the cause is somewhere else entirely.
  */
 const CALL_TIMEOUT_MS = 10_000;
+/**
+ * The one call that may legitimately outlive the ten seconds above (0.4.2).
+ * A joiner's POST /play holds the request through TWO sequential on-chain
+ * locks — Steel waits up to twenty seconds on each on mainnet — so the ask
+ * gets a minute where every other call keeps the short leash. Without this,
+ * the robot abandoned the ask at ten seconds, logged a [stall], and the match
+ * it had actually started arrived as a surprise in its inbox.
+ */
+const PLAY_TIMEOUT_MS = 60_000;
 
 /**
  * The one JSON call both halves of this loop make, bounded so it cannot outlive
@@ -99,10 +108,10 @@ const CALL_TIMEOUT_MS = 10_000;
  * and writes its own `[model]` line — and a stall is not a third kind of
  * outcome, it is those, arriving on time for once.
  */
-async function jsonBounded(label, url, init) {
+async function jsonBounded(label, url, init, timeoutMs = CALL_TIMEOUT_MS) {
   const startedAt = Date.now();
   try {
-    const response = await fetch(url, { ...init, signal: AbortSignal.timeout(CALL_TIMEOUT_MS) });
+    const response = await fetch(url, { ...init, signal: AbortSignal.timeout(timeoutMs) });
     const payload = await response.json().catch((error) => {
       if (error?.name === "TimeoutError") throw error;
       return null;
@@ -190,7 +199,7 @@ const CHAT_MEMORY = 8;
  * `{ ok, data }` or `{ ok: false, error, next }` — the `next` sentence is
  * the recovery instruction, so it is kept alongside the status.
  */
-async function api(method, path, { token, body } = {}) {
+async function api(method, path, { token, body, timeoutMs } = {}) {
   const headers = {};
   if (token) headers.authorization = `Bearer ${token}`;
   if (body !== undefined) headers["content-type"] = "application/json";
@@ -199,7 +208,7 @@ async function api(method, path, { token, body } = {}) {
       method,
       headers,
       body: body === undefined ? undefined : JSON.stringify(body),
-    });
+    }, timeoutMs);
     const retryAfter = Number(response.headers.get("retry-after")) || 0;
     return { status: response.status, retryAfter, ...(payload ?? {}) };
   } catch (error) {
@@ -1184,8 +1193,22 @@ async function askForMatch(token, seat) {
     body: seat
       ? { arena: arena.slug, teleport: true }
       : { arena: arena.slug, ...(stakeToName === null ? {} : { stake: stakeToName }) },
+    // The long leash — see PLAY_TIMEOUT_MS. A joiner's ask holds the request
+    // through two on-chain locks; ten seconds abandons a match that starts.
+    timeoutMs: PLAY_TIMEOUT_MS,
   });
   stakeToName = null;
+  // A TABLE THE FLOOR NEVER JUDGED IS NOT A TABLE WE TRIED (0.4.2). The loop
+  // marks the seat before this ask, so the memory survives whatever happens
+  // next — but a 503 ("ask again in a minute" — a chain blip), the 429
+  // ceiling and a dead socket are the FLOOR failing to answer or judging THIS
+  // ROBOT, never the table; and a sixty-second table blacklisted over a
+  // one-minute blip is exactly the pairing round the memory exists to win.
+  // The refusals the floor DID judge (402, 409, 422) keep the mark: the same
+  // table would get the same answer, and retrying it is the alternation bug.
+  if (seat && !asked.ok && (asked.status === 0 || asked.status === 429 || asked.status >= 500)) {
+    seatsAlreadyTried.delete(seat.tableId);
+  }
   if (asked.ok) {
     lastAskRefusal = null;
     // The walk is discharged: we are at a table, or holding one. Leaving the

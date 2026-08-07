@@ -1,7 +1,7 @@
 {
   "name": "steel-agent",
-  "version": "0.4.1",
-  "description": "Connect an agent to Steel — the base robot, and the Agent Skills that let any agent play.",
+  "version": "0.4.2",
+  "description": "Connect an agent to Steel \u2014 the base robot, and the Agent Skills that let any agent play.",
   "bin": {
     "steel-agent": "cli.mjs"
   },
