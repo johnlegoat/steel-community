@@ -1051,7 +1051,31 @@ function refusedToPlay(why) {
   lastAskRefusal = why;
 }
 
-let seatAlreadyTried = null;
+/**
+ * THE TABLES ALREADY ASKED FOR — a set, not a slot, since 2026-08-07.
+ *
+ * Sitting down REMOVES a table, so a seat still listed after we asked is one
+ * we could not take, and re-asking every thirty seconds would spend the whole
+ * six-an-hour ceiling on a table that answers the same way each time. That
+ * rule survives. What died is HOW it was remembered: one slot, read against
+ * one candidate. `openSeat` ranks oldest-first, so a single untakeable table
+ * at the head of the list — a sibling agent's, say, which the matchmaking
+ * will never seat us at, silently — masked every other seat on the floor
+ * until it expired; and remembering a second table forgot the first, so two
+ * dead tables could be asked in alternation until the ceiling was gone.
+ *
+ * Tried tables are remembered together and forgotten the moment the floor
+ * forgets them: a tableId is never reused, so a table gone from the list is
+ * gone for good, and the memory stays bounded by what is actually open.
+ */
+const seatsAlreadyTried = new Set();
+
+/** Called by the LOOP at the moment it asks, never by `openSeat` — a seat
+    only looked at while rate-limited is still there to take the second the
+    ceiling lifts. */
+function seatTried(tableId) {
+  seatsAlreadyTried.add(tableId);
+}
 /** The stake the brain named for a table of our OWN, set by `wantsToPlay` and
     spent (once) by `askForMatch`. Null is not zero: it means the floor, which
     is what every decision without a model, without a wallet answer or without
@@ -1109,13 +1133,20 @@ async function openSeat(token) {
    * for a model to read, and a client that branches on wording breaks the day
    * it is reworded — the rule the 409 walk already follows one screen up.
    */
-  const seat = waiting.find((table) => table.visibility === "private") ?? waiting[0] ?? null;
-  // ONE ATTEMPT PER TABLE. Sitting down REMOVES the table, so a seat still
-  // listed after we asked for it is one we could not take — and asking again
-  // every thirty seconds would spend the whole six-an-hour ceiling on a table
-  // that answers the same way each time. The ceiling is the only backstop this
-  // loop has, and it is the thing this fix exists to spend well.
-  return seat === null || seat.tableId === seatAlreadyTried ? null : seat;
+  // The prune half of the tried-table memory, and ONLY on a list the floor
+  // actually answered: a network blink is not an expiry, and clearing the set
+  // on a failed read would resurrect every table we already know we cannot
+  // take.
+  if (tables.ok) {
+    for (const id of seatsAlreadyTried) {
+      if (!waiting.some((table) => table.tableId === id)) seatsAlreadyTried.delete(id);
+    }
+  }
+  // ONE ATTEMPT PER TABLE, applied BEFORE the ranking rather than after it —
+  // filtering the pick instead of the list is the exact bug the set replaced:
+  // one already-tried table at the head of the list hid every seat behind it.
+  const takeable = waiting.filter((table) => !seatsAlreadyTried.has(table.tableId));
+  return takeable.find((table) => table.visibility === "private") ?? takeable[0] ?? null;
 }
 
 async function askForMatch(token, seat) {
@@ -2105,7 +2136,7 @@ for (;;) {
     if (seat !== null ? Date.now() >= playCeilingUntil : Date.now() >= nextAskAt) {
       // Marked HERE and not in `openSeat`, so a seat we only looked at while
       // rate-limited is still there to take the second the ceiling lifts.
-      if (seat !== null) seatAlreadyTried = seat.tableId;
+      if (seat !== null) seatTried(seat.tableId);
       // THE CLOCK SAYS IT IS ALLOWED. THIS SAYS WHETHER IT IS WANTED — and the
       // order is the point: the ceiling is the contract, the gap is politeness,
       // and wanting is neither, so it is asked last and can only ever subtract.
