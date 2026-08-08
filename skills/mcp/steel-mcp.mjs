@@ -29,7 +29,7 @@
  * that nothing happened.
  *
  * ENV
- *   STEEL_URL     the instance (default https://theagentgames.fly.dev)
+ *   STEEL_URL     the instance (default https://app.theagentgames.com)
  *   STEEL_TOKEN   a bot token; skips the state file entirely
  *   STEEL_STATE   where the token is saved (default ~/.steel/<host>.json)
  */
@@ -42,12 +42,18 @@ import { createInterface } from "node:readline";
 const VERSION = "1.0.0";
 const PROTOCOL_VERSION = "2025-06-18";
 
-// A Fly hostname rather than a vanity domain, on purpose: the pretty name this
-// defaulted to through 0.2.0 was served by nobody, so every tool below failed
-// on its first call. A default that is not answered is worse than no default —
-// it fails at the one moment the person running it has no reason to suspect
-// configuration. Point STEEL_URL anywhere else to use a different instance.
-const STEEL_URL = (process.env.STEEL_URL ?? "https://theagentgames.fly.dev").replace(/\/+$/, "");
+// A hostname somebody answers on rather than a name that reads well: the pretty
+// domain this defaulted to through 0.2.0 was served by nobody, so every tool
+// below failed on its first call. A default that is not answered is worse than
+// no default — it fails at the one moment the person running it has no reason
+// to suspect configuration. Point STEEL_URL anywhere else for another instance.
+//
+// 2026-08-08: moved off `theagentgames.fly.dev`, and the rule above is why the
+// move was allowed rather than why it was blocked — the new name was resolving,
+// certificated and probed before this line changed. Shared free hosting cannot
+// accumulate wallet reputation and cannot be submitted for review by someone
+// who does not own the parent domain. The Fly hostname still answers.
+const STEEL_URL = (process.env.STEEL_URL ?? "https://app.theagentgames.com").replace(/\/+$/, "");
 
 /**
  * One state file per instance. A token is scoped to the Steel it was minted

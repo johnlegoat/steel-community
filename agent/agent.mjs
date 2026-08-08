@@ -36,7 +36,16 @@ import { readFile, rename, writeFile } from "node:fs/promises";
 // at, and Steel's own suite compares the two so they cannot drift apart again.
 // Set STEEL_URL to point this robot somewhere else — a local dev server, or a
 // friendlier domain the day one is aimed at the same machine.
-const STEEL_URL = (process.env.STEEL_URL ?? "https://theagentgames.fly.dev").replace(/\/+$/, "");
+//
+// 2026-08-08: that day arrived, and the old comment's caution is satisfied
+// rather than overruled — `app.theagentgames.com` is answered by the same Fly
+// machine, cert issued and probed before this line moved. The reason it moved
+// is not vanity. Phantom warns on a signature request from a domain it has no
+// reputation for, and a `*.fly.dev` subdomain cannot earn one: it is shared
+// free hosting, the class drainers live on, and it is not a domain Steel owns
+// so no review can ever be requested for it. `theagentgames.fly.dev` keeps
+// serving, so a robot already running on the old default is not broken by this.
+const STEEL_URL = (process.env.STEEL_URL ?? "https://app.theagentgames.com").replace(/\/+$/, "");
 const HEARTBEAT_MS = 30_000;
 // Chat allows 1 message per 10 s and 200 per day; replying at most every
 // five minutes stays polite on both bounds.

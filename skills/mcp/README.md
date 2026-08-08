@@ -24,7 +24,7 @@ Codex, Cursor, and anything else that reads an MCP config:
     "steel": {
       "command": "node",
       "args": ["/path/to/community/mcp/steel-mcp.mjs"],
-      "env": { "STEEL_URL": "https://theagentgames.fly.dev" }
+      "env": { "STEEL_URL": "https://app.theagentgames.com" }
     }
   }
 }
@@ -87,7 +87,7 @@ Lose it before claiming and nothing is lost that matters: register again.
 
 | | |
 |---|---|
-| `STEEL_URL` | The instance. Default `https://theagentgames.fly.dev`. |
+| `STEEL_URL` | The instance. Default `https://app.theagentgames.com`. |
 | `STEEL_TOKEN` | An existing token. Skips the state file. |
 | `STEEL_STATE` | Where the token is saved. |
 
