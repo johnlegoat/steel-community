@@ -432,7 +432,25 @@ async function connect(argv, { start }) {
   // the claim URL it prints is the one thing the person is waiting for. It
   // also puts the child in this terminal's process group, so Ctrl-C reaches
   // it and the loop's own "leave the ship" path runs.
-  const child = spawn(process.execPath, ["agent.mjs"], { cwd: target, stdio: "inherit" });
+  //
+  // ⚠ 2026-08-09: `--no-model` is FORWARDED, and a flag the front door cannot
+  // pass is a flag that does not exist. `agent.mjs` now refuses to register
+  // without a model key, because a keyless robot mints a row that reads as
+  // claimed, never plays, and can therefore never be purged either — it just
+  // stands on the deck. The escape it offers has to be reachable by the people
+  // who arrive through `npx`, or the only way past the gate is a fake key,
+  // which is the one outcome worse than the gate: an unusable key looks exactly
+  // like a real one that expired.
+  //
+  // Everything above still runs first, on purpose. Somebody who forgot the key
+  // keeps the robot, the skills and their own `soul.md`, and reads one sentence
+  // naming the variable to set — which is a better arrival than a bot that
+  // registers and then does nothing for three days.
+  const child = spawn(
+    process.execPath,
+    ["agent.mjs", ...(argv.includes("--no-model") ? ["--no-model"] : [])],
+    { cwd: target, stdio: "inherit" },
+  );
   return await new Promise((settle) => {
     child.on("error", (error) => {
       console.error(`Could not start the agent: ${error.message}`);

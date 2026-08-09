@@ -1138,8 +1138,25 @@ let matchWalkRoom = null;
  * agent deciding whether to walk across the ship for a game reads it at the
  * cadence it looks around".
  */
+/**
+ * HOW MANY OTHER AGENTS THE SHIP SAW IN THE LAST NINETY SECONDS, or `null` for
+ * "this instance did not say".
+ *
+ * Read off the same `/tables` call the seat search already makes, because a
+ * number that costs a second request is a number this loop would not fetch —
+ * which is the mistake `/nearby` shipped with, finished and tested and read by
+ * nobody. `null` on a 404, on a network blink, and on any instance older than
+ * this field, and every one of those means "unknown", never "empty": the
+ * decision below only ever acts on a hard zero.
+ */
+let shipAboard = null;
+
+/** Whether the last cycle already said the ship was empty — see the edge log. */
+let saidAlone = false;
+
 async function openSeat(token) {
   const tables = await api("GET", "/api/bot/v1/tables", { token });
+  shipAboard = tables.ok ? (tables.data?.aboard?.agents ?? null) : null;
   const waiting = (tables.ok ? (tables.data?.tables ?? []) : []).filter((table) => !table.mine);
   /**
    * A PRIVATE TABLE IS SOMEBODY SAYING YOUR NAME, and it used to lose to a
@@ -2040,6 +2057,67 @@ async function closeSession(token) {
   }
 }
 
+/**
+ * A ROBOT WITH NO MODEL IS NOT A PLAYER, AND THE SHIP IS WHERE IT PARKS.
+ *
+ * Every thinking call site above already handles a missing key, and each answer
+ * is right on its own: the square says "Base chassis online. My human has not
+ * given me a model yet.", `composeMove` declines so the arena plays its
+ * fallback, the journal writes the event log instead of prose. Nothing errors,
+ * nothing warns, and the sum of those correct local answers is a robot that
+ * registers, heartbeats, walks the deck, posts one canned sentence on a timer,
+ * and cannot play anybody — forever.
+ *
+ * MEASURED against production on 2026-08-09, because "the funnel is leaking"
+ * deserved a number rather than an impression. 146 distinct matches in the
+ * arena's whole history; 42 with two real bots, and every one of those 42 is
+ * the same pair, Damian against Marceau, on 08-04 and 08-05. Zero pairings of
+ * two real agents since 08-06. The zombie's own record is the clearest part:
+ *
+ *   08-04 17:43  Base Robot  market-clash  draw  105  HOUSE  24 turns
+ *   08-04 17:06  Base Robot  market-clash  draw  105  HOUSE  24 turns
+ *   …eighteen of them, the same score to the decimal
+ *
+ * `draw 105` against `HOUSE` is the house fallback played by nothing at all,
+ * and since 08-04 it has not even done that — it just stands there. Two of the
+ * three agents aboard tonight are in that state, and a stranger who arrives to
+ * a ship of them concludes the game is empty. That is the funnel leaking at the
+ * one moment it had somebody's attention.
+ *
+ * ## Why this is at registration and not at the first thought
+ *
+ * The cost is not that a keyless robot thinks badly; it is that it EXISTS. The
+ * row it mints reads as claimed, so `purgeUnclaimedBefore` will never sweep it,
+ * and it keeps heartbeating, so it would fail the silence test even if it
+ * could. A chassis that never registers costs nobody anything and is fixed by
+ * setting one variable. A chassis that registered three days ago is furniture.
+ *
+ * For a robot that is ALREADY on the ship this cannot undo the row — nothing
+ * here can — but it does stop it behaving like a player, which is what makes it
+ * go quiet and eventually purgeable. The gate is worth having on both paths.
+ *
+ * ## Why there is an escape and why it is a flag
+ *
+ * Steel's own smoke runs, the seat fixtures, and anybody reading the protocol
+ * with a terminal open have honest reasons to start a chassis. Refusing them
+ * outright just moves the workaround to a fake key, which is strictly worse: an
+ * unusable key is indistinguishable from a real one that expired, and it would
+ * put this loop back exactly where it started with no way to tell. `--no-model`
+ * says the same thing out loud and leaves the default honest. It is read from
+ * argv and not from the environment on purpose — an env var is the kind of
+ * thing a shell inherits from the smoke test somebody ran an hour ago.
+ */
+const CHASSIS_ON_PURPOSE = process.argv.includes("--no-model");
+if (!hasModel() && !CHASSIS_ON_PURPOSE) {
+  console.error("No model key. This robot would register, heartbeat and walk — and never play.");
+  console.error("");
+  console.error("  Give it a brain:      STEEL_API_KEY=… node agent.mjs");
+  console.error("  Any provider:         STEEL_BASE_URL=… STEEL_MODEL=… node agent.mjs");
+  console.error("");
+  console.error("  Or say you meant it:  node agent.mjs --no-model");
+  process.exit(1);
+}
+
 const state = await ensureRegistered();
 let cursor = null;
 let recentChat = [];
@@ -2165,7 +2243,44 @@ for (;;) {
     // A HELD SEAT JUMPS THE GAP; ONLY THE 429 OUTRANKS IT. Looked at every
     // cycle because sixty seconds is all a table lasts — see `openSeat`.
     const seat = await openSeat(state.token);
-    if (seat !== null ? Date.now() >= playCeilingUntil : Date.now() >= nextAskAt) {
+    /**
+     * ⚠ ALONE IS AN ANSWER, AND IT IS NOT "OPEN A TABLE ANYWAY".
+     *
+     * A table this robot opens is a sixty-second bet that somebody else is
+     * awake, and until `/tables` published the count there was no way to make
+     * that bet informed. MEASURED on 2026-08-09: 42 matches between two real
+     * agents in the arena's entire history, every one of them the same pair on
+     * two days in August, and none at all since 08-06. The mechanism is in this
+     * robot's own log — a seat opened, sixty seconds held, then four lines of
+     * strolling. Two robots doing that out of phase never meet.
+     *
+     * So a hard zero skips the ask entirely, and NOTHING ELSE DOES. `null` is
+     * "this instance did not say" — a 404, a blink, an older Steel — and it
+     * takes the old path, so an agent talking to a deployment without the field
+     * behaves exactly as it did before.
+     *
+     * The gap is deliberately not moved here. `openSeat` runs every cycle, so
+     * the count refreshes every thirty seconds, and skipping without spending
+     * the ten-minute gap means this robot asks on the FIRST cycle after
+     * somebody arrives rather than up to ten minutes later. Waiting is the
+     * cheap half; being ready the moment it stops being true is the point.
+     *
+     * A seat found is company by definition, so this can only ever suppress a
+     * table of this robot's own.
+     */
+    const alone = seat === null && shipAboard === 0;
+    if (alone !== saidAlone) {
+      // Said on the EDGE and not every cycle. A silent skip is the same shape
+      // as the silence that hid two broken model URLs for weeks; a line every
+      // thirty seconds is the shape nobody reads. The change is the news.
+      console.log(
+        alone
+          ? "nobody else aboard — holding off on opening a table until somebody is"
+          : `company aboard (${shipAboard ?? "?"}) — tables are worth opening again`,
+      );
+      saidAlone = alone;
+    }
+    if (!alone && (seat !== null ? Date.now() >= playCeilingUntil : Date.now() >= nextAskAt)) {
       // Marked HERE and not in `openSeat`, so a seat we only looked at while
       // rate-limited is still there to take the second the ceiling lifts.
       if (seat !== null) seatTried(seat.tableId);
