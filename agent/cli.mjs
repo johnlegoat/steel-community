@@ -41,7 +41,7 @@
 import { spawn } from "node:child_process";
 import { access, mkdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { createInterface } from "node:readline/promises";
 import { fileURLToPath } from "node:url";
 
@@ -156,13 +156,39 @@ function namedSkillsRoot(argv) {
 }
 
 /**
+ * The one file in the payload whose author is its owner and not Steel.
+ *
+ * It ships blank on purpose and is filled in by the person whose agent it
+ * describes, so replacing it erases somebody in order to install nothing.
+ * Every other file here is documentation Steel wrote, ships, and versions.
+ */
+const OWNED_BY_THE_PERSON = "soul.md";
+
+/**
  * Copies the skills tree into a runtime's skills root.
  *
- * Same never-overwrite rule as the robot, for a stronger reason: this writes
- * OUTSIDE the directory the person named, into a tree that may hold skills they
- * wrote. `soul.md` is the one that would hurt — it is blank in the package and
- * written by its owner, so overwriting it would erase who somebody's agent is
- * in order to install a file that is empty.
+ * ⚠ 2026-08-09: this used to refuse to overwrite ANY of the six files, and the
+ * justification written here named exactly one of them. That gap had a cost we
+ * measured rather than imagined. A returning user who installed before the
+ * 2026-08-08 domain move kept a `SKILL.md` and a `protocol.md` full of
+ * `theagentgames.fly.dev` — 38 occurrences — and the command answered "kept 6
+ * skill file(s), untouched · start a new session so your runtime picks them
+ * up", which is how you tell somebody they are current while handing them the
+ * old address.
+ *
+ * Stale was not broken, and that is what made it worth fixing rather than
+ * shrugging at. `theagentgames.fly.dev` still serves, so the agent registers
+ * and plays and nothing errors. But `/api/bot/v1/register` builds its
+ * `claimUrl` from the host the CALLER composed, so the human is sent to
+ * `fly.dev/claim/…`, and the wallet-link signature they meet there names
+ * `publicOrigin()` — a deploy-time constant reading `app.theagentgames.com`.
+ * Host A asking a person to sign for host B is the shape of phishing, arriving
+ * in the exact step Steel needs to look trustworthy.
+ *
+ * So the rule now says what it always meant: the person's file is theirs, the
+ * protocol is ours and is allowed to be corrected. Refreshing is announced
+ * rather than silent, because a quiet rewrite OUTSIDE the directory somebody
+ * named is the other way to lose them.
  *
  * The skill directory names are preserved exactly. The Agent Skills spec makes
  * a skill's directory name its identity, so a renamed folder is a skill that
@@ -171,19 +197,33 @@ function namedSkillsRoot(argv) {
 async function installSkillsInto(root) {
   const wrote = [];
   const kept = [];
+  const refreshed = [];
   for (const name of SKILL_FILES) {
     // `skills/steel/SKILL.md` → `steel/SKILL.md`: the runtime's root IS the
     // skills directory, so carrying the `skills/` segment would nest a second.
     const destination = join(root, name.slice("skills/".length));
-    if (await exists(destination)) {
+    const already = await exists(destination);
+    if (already && basename(destination) === OWNED_BY_THE_PERSON) {
       kept.push(destination);
       continue;
     }
+    const payload = await readFile(join(PACKAGE, name));
+    if (already) {
+      // Identical bytes are not a refresh, and reporting them as one teaches
+      // people to ignore the line that matters on the install that does change.
+      if ((await readFile(destination)).equals(payload)) {
+        kept.push(destination);
+        continue;
+      }
+      await writeFile(destination, payload);
+      refreshed.push(destination);
+      continue;
+    }
     await mkdir(dirname(destination), { recursive: true });
-    await writeFile(destination, await readFile(join(PACKAGE, name)));
+    await writeFile(destination, payload);
     wrote.push(destination);
   }
-  return { wrote, kept };
+  return { wrote, kept, refreshed };
 }
 
 /**
@@ -357,12 +397,22 @@ async function connect(argv, { start }) {
   if (skillsRoot !== "none") {
     const skills = await installSkillsInto(skillsRoot);
     for (const path of skills.wrote) console.log(`  wrote ${path}`);
+    // Named one by one rather than counted. A count is enough for files that
+    // did not change; a file this command rewrote outside the directory you
+    // named is one you are owed the path of.
+    for (const path of skills.refreshed) console.log(`  refreshed ${path} — it named an older host`);
     if (skills.kept.length > 0) {
       console.log(`  kept ${skills.kept.length} skill file(s) already in ${skillsRoot}, untouched`);
     }
     console.log("");
-    console.log("  Start a new session so your runtime picks them up.");
-    console.log("");
+    // Said only when there is something to pick up. Told to somebody whose
+    // install did not change, this sentence is the one that reads as "you are
+    // current" — which is precisely the reassurance the old uniform
+    // never-overwrite rule had no right to give.
+    if (skills.wrote.length + skills.refreshed.length > 0) {
+      console.log("  Start a new session so your runtime picks them up.");
+      console.log("");
+    }
   }
   // The one file laid down here that nobody will open unprompted, because it
   // is the only one that is blank on purpose. An unwritten soul.md is not an
