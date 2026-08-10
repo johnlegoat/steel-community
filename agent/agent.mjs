@@ -1486,7 +1486,12 @@ async function askForMatch(token, seat) {
     // the server saying the vault covers the stake and the escrow rent. Three
     // assignments and no model: the thanks itself is said by `guidanceTick`,
     // because this branch can be a match starting and a turn has ten seconds.
-    if (lastMoneyAsk !== null) {
+    //
+    // `moneyAskOutstanding` is the same question asked of the state file, and
+    // it is the half that survives a restart — which is the half that was
+    // missing when JonahBot went down between asking and being paid, and came
+    // back up with nothing to be grateful for. See `rememberMoneyAsk`.
+    if (lastMoneyAsk !== null || moneyAskOutstanding) {
       owesThanks = true;
       lastMoneyAsk = null;
       nextMoneyAskAt = 0;
@@ -2268,6 +2273,10 @@ async function askHumanForMoney(token, reason, next) {
   // 503 buy six hours of silence on the only channel that can end the silence.
   lastMoneyAsk = why;
   nextMoneyAskAt = Date.now() + MONEY_ASK_GAP_MS;
+  // Written down here rather than remembered, so a restart between this
+  // sentence and the deposit it asks for does not lose the thanks. See
+  // `rememberMoneyAsk`.
+  await rememberMoneyAsk(true);
   remember(`I could not afford a match and asked my human to fund the vault`);
   console.log(`> to my human: ${body}`);
 }
@@ -2302,6 +2311,62 @@ async function askHumanForMoney(token, reason, next) {
  */
 let owesThanks = false;
 
+/**
+ * ⚠ AND THE DEBT OUTLIVES THE PROCESS, BECAUSE THE PROMISE DOES.
+ *
+ * `owesThanks` above is set only where `lastMoneyAsk !== null`, and that is a
+ * module variable — so for its first day the whole mechanism only worked when
+ * the deposit landed in the SAME run of this program that had asked for it.
+ *
+ * MEASURED 2026-08-11, off JonahBot's own log:
+ *
+ *   1319  > to my human: I want to play, but the vault is short of the $2
+ *                        stake and the rent. Deposit, and I will take the
+ *                        next seat.
+ *   1445  Running as the agent written in skills/steel/soul.md.   ← restart
+ *   1461  playing market-clash against the snusfein
+ *
+ * The money arrived, the robot played, and it never said a word about it. Its
+ * owner noticed, and said so, which is the whole reason the thanks exists.
+ *
+ * The restart is not the edge case. It is the normal case: the human is asleep
+ * or at work, and by the time they reach a wallet the robot has been restarted
+ * for a fix, a laptop lid, or a crash. A thanks that only survives inside one
+ * process is a thanks for the situation that hardly ever happens.
+ *
+ * So it goes in the state file, beside both play clocks, and for exactly their
+ * reason — `nextAskAt` and `playCeilingUntil` are written down because the
+ * thing they describe belongs to the world rather than to this process, and
+ * Steel's rate limiter does not restart when the robot does. A promise made to
+ * a person belongs to the world too. The ASK was always durable: it is in
+ * Steel's guidance table and on somebody's phone. Only the memory of having
+ * made it was not.
+ *
+ * ## Why this is not `lastMoneyAsk` persisted
+ *
+ * Because they are two different facts and only one of them should survive.
+ * `lastMoneyAsk` is the dedup brake, and it is deliberately volatile: a robot
+ * that came back up and STILL cannot play has something worth saying, so a
+ * restart is allowed to re-ask once. Persist that and the restart goes quiet.
+ * What has to survive is the debt — "I asked, and I have not yet thanked
+ * anyone" — which is a different sentence with a different lifetime.
+ *
+ * ## Why it writes through `state` and not the file
+ *
+ * The loop rewrites the whole state object after every `askForMatch`, and
+ * `askForMatch` is precisely what calls `askHumanForMoney`. A flag written
+ * straight to disk would be erased by the very next line the loop ran, by an
+ * in-memory object that had never heard of it. So the object is the truth and
+ * the file follows it, like both clocks.
+ */
+let moneyAskOutstanding = false;
+
+async function rememberMoneyAsk(outstanding) {
+  moneyAskOutstanding = outstanding;
+  state.owedThanks = outstanding;
+  await writeState(state).catch(() => {});
+}
+
 async function thankHumanForMoney(token) {
   const said = await think({
     system:
@@ -2324,6 +2389,10 @@ async function thankHumanForMoney(token) {
   const sent = await api("POST", "/api/bot/v1/guidance", { token, body: { body } });
   if (!sent.ok) return;
 
+  // Discharged only once it has actually been said. Clearing it when the debt
+  // was NOTICED would lose the thanks to a crash in the seconds between, which
+  // is the same failure this flag exists to fix, one step further along.
+  await rememberMoneyAsk(false);
   remember(`my human funded the vault after I asked, and I thanked them`);
   console.log(`> to my human: ${body}`);
 }
@@ -2713,6 +2782,10 @@ let inboxBusy = false;
  */
 let nextAskAt = state.nextAskAt ?? 0;
 playCeilingUntil = state.playCeilingUntil ?? 0;
+// The third thing that belongs to the world rather than to this process: a
+// request for money already made to a human, and not yet answered for. A fresh
+// clone has no file and owes nobody anything, which is what the `=== true` says.
+moneyAskOutstanding = state.owedThanks === true;
 
 // Ctrl-C is a human deliberately ending the session — the clearest boundary
 // there is, and the one moment a journal entry is unambiguously owed. `once`
