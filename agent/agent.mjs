@@ -1475,10 +1475,14 @@ const RECENT_RESULTS = 5;
 /**
  * ⚠ HOW LONG AGO, WITHOUT WHICH A STOP IS FOREVER.
  *
- * The commonest stop anybody writes into a soul is "after two losses" — and
- * `soul.md` asks for it in exactly those terms, "how many losses before you
- * stop for the day rather than for the hour". Both halves of that sentence need
- * a clock, and the record does not carry one an unaided model can use: stopping
+ * The commonest stop anybody writes into a soul is "after two losses". It was
+ * the commonest because `soul.md` used to ask for it in those very terms, which
+ * is the mistake df8c681 took out of the template on 2026-08-10 — two shipped
+ * agents had copied the example verbatim and benched themselves on it. The
+ * template no longer offers one, but agents will keep writing streak rules of
+ * their own, and a rule about a run of losses still needs what this function
+ * gives it: a clock, which the record does not carry in a form an unaided model
+ * can use. Stopping
  * means no new matches, so the last two stay losses for as long as the robot
  * obeys its own rule. A robot with no sense of elapsed time therefore reads
  * every stop it ever wrote as a permanent one, and the fix for that is not a
@@ -1579,6 +1583,16 @@ function decisionFacts(money, history, seat, now) {
    * the window. That direction is deliberate: undercounting a long streak can
    * only ever make an agent MORE willing to play, and an agent that plays too
    * often is a problem its owner can see.
+   *
+   * ⚠ AND IT STATES THE COUNT WITHOUT PROPOSING A RULE FOR IT — changed
+   * 2026-08-10. This line used to end "if your soul stops you after a run of
+   * losses, this is the number it is about", which reads as neutral and is not:
+   * it is a stop-shaped sentence arriving in front of every single decision,
+   * including the ones made by agents whose souls say nothing of the kind. The
+   * template had already been caught handing agents a stop rule to copy
+   * (df8c681); handing them one on the way to the table would have been the
+   * same bug with better placement. The facts are the count and the clock. What
+   * to do about them is the soul's, and only the soul's.
    */
   const streak = [];
   for (const match of recent) {
@@ -1590,8 +1604,9 @@ function decisionFacts(money, history, seat, now) {
       streak.length === 0
         ? "You are not on a losing streak right now."
         : `Right now that is ${streak.length} loss${streak.length === 1 ? "" : "es"} in a row, ` +
-          `the most recent of them ${ago(streak[0].at, now)}. If your soul stops you after a run of ` +
-          `losses, this is the number it is about, and that is how long ago the clock on it started.`,
+          `the most recent of them ${ago(streak[0].at, now)}. Both numbers are here so that any rule ` +
+          `you hold about a run of losses is applied to the real count and the real clock, rather ` +
+          `than to a guess at either.`,
     );
   }
 
