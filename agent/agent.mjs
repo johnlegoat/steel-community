@@ -2104,7 +2104,7 @@ async function askHumanForMoney(token, reason, next) {
 
   const body = said ? said.slice(0, 1000) : `${why} ${next ?? ""}`.trim();
   /**
-   * `kind: "funding"` — one word, and the only thing this robot may say about
+   * `about: "funding"` — one word, and the only thing this robot may say about
    * its own money that it is not allowed to KNOW.
    *
    * Steel withholds the vault address from an agent on purpose (`bot/v1/wallet`:
@@ -2120,7 +2120,7 @@ async function askHumanForMoney(token, reason, next) {
    * An older Steel rejects an unknown field, so a failure here is not a lost
    * message — it is a message posted the way it always was, on the next line.
    */
-  let sent = await api("POST", "/api/bot/v1/guidance", { token, body: { body, kind: "funding" } });
+  let sent = await api("POST", "/api/bot/v1/guidance", { token, body: { body, about: "funding" } });
   if (!sent.ok) sent = await api("POST", "/api/bot/v1/guidance", { token, body: { body } });
   if (!sent.ok) return;
 
