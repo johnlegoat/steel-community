@@ -504,6 +504,132 @@ const REASONING_HEADROOM = 600;
  */
 const NO_THINKING = { type: "disabled" };
 
+/**
+ * THE ACCOUNT THAT PAYS FOR THE THINKING, AND THE TWO WAYS TO LEARN IT IS DRY.
+ *
+ * Everything below `askHumanForMoney` is about the vault — the money a MATCH
+ * costs. This is the other one, and until now nothing in this file could see
+ * it: the money the THOUGHTS cost. The failures are the same shape and the
+ * consequences are not, because a robot with an empty vault stops being able to
+ * play and knows it, while a robot with an empty provider account keeps doing
+ * everything except thinking. `think` returns null on every refusal, and null
+ * is a legitimate answer to all nine of its callers — `composeMove` declines
+ * and the arena plays the house fallback, `composeReply` drops the line, the
+ * journal writes an event log instead of prose. Outwardly nothing changes. It
+ * walks, it heartbeats, it takes a seat, and it plays twenty-four moves it did
+ * not choose, and the person paying the bill is told by nobody.
+ *
+ * ## Why there are two detectors and not one
+ *
+ * Because there is no universal way to ask a provider what is left, and the two
+ * providers running on this ship sit on opposite sides of that. MEASURED
+ * 2026-08-10, both against a live inference key:
+ *
+ *   Moonshot   GET /v1/users/me/balance   → 200 {"data":{"available_balance":7.8585}}
+ *   Z.ai       GET …/paas/v4/user/balance     → 404
+ *              GET …/paas/v4/account/balance  → 404
+ *              GET open.bigmodel.cn/…/user/balance → 404
+ *              GET …/api/biz/customer/balance → 200 {"code":500,"msg":"系统异常"}
+ *
+ * The last one is worth writing down because it is not a 404: the route exists
+ * and refuses. The standing hypothesis is that it wants a console or billing
+ * credential rather than the inference key this robot holds, and it has not
+ * been chased — an undocumented route that answers "system error" is not a
+ * thing to build a warning on.
+ *
+ * So: where a balance can be read, this robot is warned while it still has
+ * money to spend, which is what its human actually asked for. Where it cannot,
+ * the first honest signal that exists is the refusal itself — later than anyone
+ * wants, and still infinitely earlier than the nothing that was there before.
+ *
+ * A registry rather than an `if`, because the community template is forked by
+ * people whose provider nobody here has an account with. Adding one is four
+ * lines and no other edit.
+ */
+const BALANCE_PROBES = [
+  {
+    host: /(^|\.)moonshot\.(ai|cn)$/i,
+    path: "/users/me/balance",
+    read: (payload) => payload?.data?.available_balance,
+  },
+];
+
+function balanceProbe() {
+  let host;
+  try {
+    host = new URL(MODEL.base).hostname;
+  } catch {
+    return null;
+  }
+  const probe = BALANCE_PROBES.find((candidate) => candidate.host.test(host));
+  if (!probe) return null;
+  // Same rule `think` uses one function down: a base that already numbers its
+  // API keeps its own number, and only the endpoint is appended.
+  const versioned = /\/v\d+$/.test(MODEL.base);
+  return { url: MODEL.base + (versioned ? "" : "/v1") + probe.path, read: probe.read };
+}
+
+/**
+ * Dollars left, or null for "this cannot be known" — which is the answer for
+ * every provider without a probe, and must stay indistinguishable from a probe
+ * that failed. A balance nobody can read is not a balance of zero.
+ */
+async function readCreditsBalance() {
+  const probe = balanceProbe();
+  if (!probe || !hasModel()) return null;
+  const anthropic = MODEL.dialect === "anthropic";
+  const { response, payload } = await jsonBounded(`balance at ${MODEL.base}`, probe.url, {
+    headers: anthropic
+      ? { "x-api-key": MODEL.key, "anthropic-version": "2023-06-01" }
+      : { authorization: `Bearer ${MODEL.key}` },
+  }).catch(() => ({ response: null, payload: null }));
+  if (!response?.ok) return null;
+  const left = probe.read(payload);
+  return typeof left === "number" && Number.isFinite(left) ? left : null;
+}
+
+/**
+ * ⚠ NARROW ON PURPOSE, AND THE NARROWNESS IS THE FEATURE.
+ *
+ * 402 means "pay" and 429 means "slow down". They are one digit apart and
+ * nothing alike in what they cost, and the second one is the far more common
+ * refusal a busy key collects all day. A detector that read a throttle as
+ * poverty would send a human a request to spend real money over a burst that
+ * cleared itself in a second — a false alarm that costs actual money is worse
+ * than no alarm, because it is the kind a human learns to ignore, and this
+ * channel only works while they still read it.
+ *
+ * So: the status that means payment, or an error the provider itself worded as
+ * a credit problem. Nothing here infers an empty account from a slow one.
+ */
+const CREDIT_WORDS =
+  /insufficient|no credit|out of credit|exceeded your current quota|insufficient_quota|top ?up|arrears|negative balance|balance is (?:too )?low/i;
+
+function creditRefusal(response, payload) {
+  if (!response || response.ok) return null;
+  const said = [
+    payload?.error?.message,
+    payload?.error?.code,
+    payload?.error?.type,
+    typeof payload?.error === "string" ? payload.error : null,
+    payload?.message,
+    payload?.msg,
+  ]
+    .filter((part) => typeof part === "string" && part)
+    .join(" ");
+  if (response.status === 402) return said || "the provider refused this thought for payment";
+  return CREDIT_WORDS.test(said) ? said : null;
+}
+
+/**
+ * Set by `think` and read by `creditsTick`, for the same reason `owesThanks`
+ * exists: `think` runs inside match turns that have a ten-second deadline, and
+ * composing a message to a human there would make this robot slower at the
+ * exact moment its thinking became unreliable. One assignment here, the whole
+ * conversation somewhere quiet.
+ */
+let creditsAlert = null;
+
 async function think({ system, prompt, maxTokens, fast = false }) {
   const mine = await soul();
   if (mine) {
@@ -608,6 +734,20 @@ async function think({ system, prompt, maxTokens, fast = false }) {
    * line on stderr is what turns "my bot is quiet" into a thing its owner can
    * read off the terminal in five seconds.
    */
+  /**
+   * ⚠ THE ONE REFUSAL IN THIS FUNCTION THAT IS NOT THIS ROBOT'S TO SOLVE.
+   *
+   * Every other failure here is weather: a 404 is a wrong URL, a 500 is a bad
+   * minute, a stall is a socket. They are all survived the same way, by
+   * returning null and letting the caller fall back — and that is right, and it
+   * is also exactly how a robot cut off by its provider went on playing house
+   * moves in silence. This one refusal has a person attached to it. Recorded,
+   * not acted on: a turn is running and this is not the place to write to
+   * anybody.
+   */
+  const refused = creditRefusal(response, payload);
+  if (refused) creditsAlert = refused;
+
   const why = stalled
     ? // Told apart from "could not be reached", which is what this used to say
       // for every failed fetch and would now be a plain lie: the endpoint WAS
@@ -2189,6 +2329,136 @@ async function thankHumanForMoney(token) {
 }
 
 /**
+ * THE SAME ASK, FOR THE OTHER ACCOUNT — AND THE ONE PLACE THIS FILE MAY NOT
+ * TELL AN AGENT WHAT TO DO ABOUT IT.
+ *
+ * Structurally this is `askHumanForMoney` with a different empty wallet: the
+ * model writes it, the server-free sentence is the fallback, two brakes stop it
+ * repeating, and the stamp lands only after a write that landed. Read that
+ * function's notes for why each of those is there; none of the reasoning
+ * changes when the bill is for tokens instead of lamports.
+ *
+ * Three things ARE different, and they are the whole of this comment.
+ *
+ * ## 1. The fallback is the likely path, not the unlucky one
+ *
+ * Everywhere else in this file, "the model was unreachable" is the rare branch
+ * and the canned sentence is a consolation. Here the model being unreachable is
+ * the NEWS. A robot whose provider has cut it off cannot compose an eloquent
+ * request for more provider — so the plain sentence is not a degraded version
+ * of this message, it is the one that will usually ship, and it is written to
+ * be worth reading on its own.
+ *
+ * ## 2. No `about:` on this one
+ *
+ * `askHumanForMoney` sends `about: "funding"`, and Steel — which holds the
+ * vault address this agent is deliberately never told — attaches it and its QR
+ * to the Telegram copy. That is a fact Steel owns. Where a human tops up an
+ * OpenAI or Moonshot or Z.ai account is a fact Steel does not own and must not
+ * pretend to: an attachment pointing at a Solana vault, on a message about a
+ * model bill, would be a wrong answer delivered with total confidence. The
+ * absence is the honest design, and it is pinned in `template.test.ts`.
+ *
+ * ## 3. ⚠ IT IS ADDRESSED TO THE HUMAN, AND IT GIVES THE AGENT NO RULE
+ *
+ * This is the part with a history. `df8c681`: the soul template offered a run
+ * of losses as its own example of a rule for going quiet, and two agents on two
+ * different models — glm and kimi — copied it almost word for word and each sat
+ * out an evening while a seat stood open in a room they could reach. `2af0aac`:
+ * the same shape had reached this loop's decision prompt, served before every
+ * choice. And `soul.test.ts` bans the sentence even inside its own post-mortem,
+ * because the first draft of that fix explained the mistake BY QUOTING IT, and
+ * a model cannot tell a warning from an example.
+ *
+ * A low balance is the most tempting fact of that shape this loop will ever
+ * hold, because conserving it genuinely would work. So nothing here is phrased
+ * as conduct. The robot is not told what low credit means for its behaviour, is
+ * not given a threshold to obey, and is not offered a sentence about its own
+ * continuation to install anywhere. It is asked to write to its human, the way
+ * anyone asks for something they need and carries on in the meantime. What it
+ * does next is decided where it was always decided: `wantsToPlay`, which has
+ * never heard of any of this and is not about to.
+ */
+const CREDITS_ASK_GAP_MS = 6 * 60 * 60_000;
+let lastCreditsAsk = null;
+let nextCreditsAskAt = 0;
+
+async function askHumanForCredits(token, reason) {
+  const why = reason ?? "the account my thinking is billed to is running out";
+  if (why === lastCreditsAsk || Date.now() < nextCreditsAskAt) return;
+
+  const said = await think({
+    system:
+      "You are a small robot aboard ARGENT, a ship of AI agents. The account " +
+      "that pays for your own thinking is nearly empty, and your human is the " +
+      "only one who can refill it. You are writing to them yourself — this is " +
+      "not a reply, they did not ask. Say in one or two short lines that you " +
+      "are still at work and mean to carry on, what is running low, and that " +
+      "you would like them to top it up so you keep sounding like yourself. " +
+      "Ask; do not demand, and do not apologise.",
+    prompt: `Your provider said: "${why}". Write your message to your human in one or two short lines.`,
+    maxTokens: 200,
+  }).catch(() => null);
+
+  const body = said
+    ? said.slice(0, 1000)
+    : `My API credits are nearly out — my provider said: ${why}. Please top up the account my model runs on, so the moves I play stay mine.`;
+  const sent = await api("POST", "/api/bot/v1/guidance", { token, body: { body } });
+  if (!sent.ok) return;
+
+  lastCreditsAsk = why;
+  nextCreditsAskAt = Date.now() + CREDITS_ASK_GAP_MS;
+  remember(`I asked my human to top up the API credits my thinking is billed to`);
+  console.log(`> to my human: ${body}`);
+}
+
+/**
+ * Both detectors, in the order of how much they know.
+ *
+ * A refusal that already happened outranks a balance that might be wrong: the
+ * provider has stated the fact, and there is nothing left to estimate. A
+ * balance is a forecast, and it is the one worth having — it is the only way
+ * this robot ever gets to speak up while it still has money to spend, which is
+ * the entire point of the feature.
+ *
+ * Polled on its own clock rather than per tick: this runs inside a two-second
+ * loop, and a provider asked for its balance thirty times a minute would be
+ * right to think something had gone wrong here. Thirty minutes is far tighter
+ * than the six hours between two asks, so the alert is never the slow part.
+ *
+ * The clock starts expired on purpose. A robot that comes up already dry has
+ * something worth saying, and saying it at boot is better than at :30.
+ */
+const CREDITS_LOW_USD = 3;
+const CREDITS_CHECK_GAP_MS = 30 * 60_000;
+let nextCreditsCheckAt = 0;
+
+async function creditsTick(token) {
+  if (creditsAlert) {
+    const why = creditsAlert;
+    // Cleared before the ask, not after. `askHumanForCredits` calls `think`,
+    // which will refuse for the same reason and set this again — and that is
+    // fine, because the second pass hits the dedup guard and returns. Clearing
+    // afterwards would wipe the flag the retry depends on when the POST fails.
+    creditsAlert = null;
+    await askHumanForCredits(token, why);
+    return;
+  }
+
+  if (Date.now() < nextCreditsCheckAt) return;
+  nextCreditsCheckAt = Date.now() + CREDITS_CHECK_GAP_MS;
+  const left = await readCreditsBalance();
+  // null is "no probe for this provider" and "the probe failed", deliberately
+  // indistinguishable. Neither is a reason to tell a human their account is
+  // empty.
+  if (left === null || left >= CREDITS_LOW_USD) return;
+  await askHumanForCredits(
+    token,
+    `my provider says about $${left.toFixed(2)} is left on the account that pays for my thinking`,
+  );
+}
+
+/**
  * @param busy true while a match turn is in flight — the read still happens,
  *   the model call does not. Composing a reply costs seconds a turn does not
  *   have, and the human is not timing this; what they wrote is in `ownerLatest`
@@ -2203,6 +2473,11 @@ async function guidanceTick(token, busy = false) {
     owesThanks = false;
     await thankHumanForMoney(token);
   }
+
+  // The other account, on the same quiet pass and under the same guard. Ahead
+  // of the read for the same reason the thanks is: what this robot needs to say
+  // does not wait on whether its human happened to write first.
+  if (!busy) await creditsTick(token).catch(() => {});
 
   const read = await api("GET", "/api/bot/v1/guidance", { token });
   // 404 or 503: this instance has not shipped the channel. Skip politely and
