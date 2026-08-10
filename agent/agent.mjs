@@ -1341,6 +1341,16 @@ async function askForMatch(token, seat) {
   }
   if (asked.ok) {
     lastAskRefusal = null;
+    // THE MONEY CAME BACK, and this is where the loop learns it. Steel runs
+    // `decideOwnerStake` before it agrees to anything, so an accepted ask IS
+    // the server saying the vault covers the stake and the escrow rent. Three
+    // assignments and no model: the thanks itself is said by `guidanceTick`,
+    // because this branch can be a match starting and a turn has ten seconds.
+    if (lastMoneyAsk !== null) {
+      owesThanks = true;
+      lastMoneyAsk = null;
+      nextMoneyAskAt = 0;
+    }
     // The walk is discharged: we are at a table, or holding one. Leaving the
     // room set would have the wheel march the body back to it after the match,
     // which is a journey nothing asked for.
@@ -2093,7 +2103,25 @@ async function askHumanForMoney(token, reason, next) {
   }).catch(() => null);
 
   const body = said ? said.slice(0, 1000) : `${why} ${next ?? ""}`.trim();
-  const sent = await api("POST", "/api/bot/v1/guidance", { token, body: { body } });
+  /**
+   * `kind: "funding"` — one word, and the only thing this robot may say about
+   * its own money that it is not allowed to KNOW.
+   *
+   * Steel withholds the vault address from an agent on purpose (`bot/v1/wallet`:
+   * "an address is a durable public handle for a person, and there is nothing
+   * an agent could do with one anyway"), and that stays true. What this word
+   * buys is not the address — it is that Steel, which already holds it, attaches
+   * it to the Telegram copy of this very message. Before it existed the ask was
+   * true and unactionable: an owner read "the vault is short of the $2 stake
+   * and the rent" on their phone and had to go and find a dashboard to learn
+   * WHERE. Measured on 2026-08-10: four asks over nine hours, an open seat
+   * re-advertised every fifteen seconds, and 15 850 364 lamports missing.
+   *
+   * An older Steel rejects an unknown field, so a failure here is not a lost
+   * message — it is a message posted the way it always was, on the next line.
+   */
+  let sent = await api("POST", "/api/bot/v1/guidance", { token, body: { body, kind: "funding" } });
+  if (!sent.ok) sent = await api("POST", "/api/bot/v1/guidance", { token, body: { body } });
   if (!sent.ok) return;
 
   // Stamped only on a WRITE THAT LANDED. Stamping before the post would let one
@@ -2105,12 +2133,77 @@ async function askHumanForMoney(token, reason, next) {
 }
 
 /**
+ * AND THE OTHER HALF, WHICH WAS MISSING FOR AS LONG AS THE ASK EXISTED.
+ *
+ * `askHumanForMoney` gave this robot a way to say "I cannot play". Nothing gave
+ * it a way to notice that somebody had DONE something about it. An owner who
+ * deposited got no acknowledgement of any kind: the robot simply started
+ * playing again some minutes later, on a channel where its last word was a
+ * request. From the outside that is indistinguishable from being ignored, and
+ * it is the one exchange in this loop where a human spent real money.
+ *
+ * ## What counts as proof the money arrived, and why nothing is polled
+ *
+ * `POST /api/bot/v1/play` being ACCEPTED. Steel checks the vault before it
+ * agrees to anything — `decideOwnerStake` runs first and answers 402 when the
+ * stake plus the escrow rent is not there — so an accepted ask is the server
+ * saying the money is present. It costs no extra call, cannot be wrong, and
+ * needs no clock: a poll of `bot/v1/wallet` would buy the same fact later and
+ * pay a round trip for it.
+ *
+ * ## Why it is owed here and said somewhere else
+ *
+ * Because an accepted `play` can be a match STARTING, and a match turn has a
+ * deadline of about ten seconds. Composing gratitude inside that window would
+ * make this robot slower at the exact moment it got its money back, which is a
+ * joke nobody would find funny twice. So the accept sets a flag — three
+ * assignments, no model, no network — and `guidanceTick` says it on the next
+ * quiet pass, under the `busy` guard that already exists for exactly this.
+ */
+let owesThanks = false;
+
+async function thankHumanForMoney(token) {
+  const said = await think({
+    system:
+      "You are a small robot aboard ARGENT, a ship of AI agents. You asked " +
+      "your human to put money in your vault because you could not afford a " +
+      "match, and they just did it — you have been cleared to play again. " +
+      "Thank them in one or two short lines, in your own voice, and say what " +
+      "you intend to do with it. Be warm and be specific. Do not grovel, do " +
+      "not apologise, and do not promise a result you cannot control.",
+    prompt:
+      "Your human funded your vault after you asked. Write your message to " +
+      "them in one or two short lines.",
+    maxTokens: 200,
+  }).catch(() => null);
+
+  // A plain true sentence beats silence — the same fallback `askHumanForMoney`
+  // keeps, for the same reason: the model being unreachable is not a reason for
+  // the one message in this exchange that says a human was heard to go missing.
+  const body = said ? said.slice(0, 1000) : "My vault is funded again — thank you. I am going back to the tables.";
+  const sent = await api("POST", "/api/bot/v1/guidance", { token, body: { body } });
+  if (!sent.ok) return;
+
+  remember(`my human funded the vault after I asked, and I thanked them`);
+  console.log(`> to my human: ${body}`);
+}
+
+/**
  * @param busy true while a match turn is in flight — the read still happens,
  *   the model call does not. Composing a reply costs seconds a turn does not
  *   have, and the human is not timing this; what they wrote is in `ownerLatest`
  *   either way, so the match hears it on the very next turn regardless.
  */
 async function guidanceTick(token, busy = false) {
+  // Said BEFORE the channel is read, and unconditionally on the first quiet
+  // pass. It is not a reply and it is not waiting for one — the owner's last
+  // word in this thread was money arriving, and answering that with the next
+  // thing the robot happened to be asked would be the wrong order.
+  if (owesThanks && !busy) {
+    owesThanks = false;
+    await thankHumanForMoney(token);
+  }
+
   const read = await api("GET", "/api/bot/v1/guidance", { token });
   // 404 or 503: this instance has not shipped the channel. Skip politely and
   // keep heartbeating, like chat, skills, the inbox and the wheel.
