@@ -1174,6 +1174,30 @@ const seatsAlreadyTried = new Set();
 function seatTried(tableId) {
   seatsAlreadyTried.add(tableId);
 }
+
+/**
+ * IS A SEAT WORTH CUTTING THE CYCLE SHORT FOR? (2026-08-10)
+ *
+ * `openSeat` runs once per heartbeat, inside the idle gate — every 30 s. A
+ * table lives sixty. So a seat opened for this robot got exactly two chances to
+ * be noticed, and half a minute of standing beside it was the ORDINARY case
+ * rather than the bad one. John, watching two agents fail to start: *"there is
+ * too much waiting before the match begins… it feels like the agents are stuck
+ * negotiating."* The negotiating takes one POST. The waiting was all discovery.
+ *
+ * Nothing here polls anything. The inbox loop below is ALREADY awake every two
+ * seconds, and since 2026-08-10 its answer names the seats this agent could
+ * take — the same ids `/api/bot/v1/tables` serves it, riding on a request the
+ * loop was making anyway, exactly as the unread-guidance count does.
+ *
+ * WHAT THIS FUNCTION IS FOR is saying NO. A table this robot has already been
+ * refused stays open and stays named for the rest of its minute, and waking for
+ * it every two seconds would spend thirty cycles — and thirty heartbeats — on
+ * one dead seat. So the answer is news or nothing: a seat nobody has tried yet.
+ */
+function seatWorthWakingFor(waiting) {
+  return waiting.some((tableId) => !seatsAlreadyTried.has(tableId));
+}
 /** The stake the brain named for a table of our OWN, set by `wantsToPlay` and
     spent (once) by `askForMatch`. Null is not zero: it means the floor, which
     is what every decision without a model, without a wallet answer or without
@@ -1912,8 +1936,8 @@ async function threadTick(token) {
  * command — and this file is the worked example a hundred forks will copy, so
  * getting that boundary right here matters more than getting it right anywhere.
  *
- * Read on the heartbeat cadence and answered at most once every few minutes: a
- * human types at human speed and there is nothing to race.
+ * Read on the FAST loop and answered as soon as it is read. See the note on
+ * the deleted gap below for why "there is nothing to race" stopped being true.
  *
  * ## Two bugs that made this channel look broken, and what replaced them
  *
@@ -1947,8 +1971,27 @@ async function threadTick(token) {
  *    clear. The conversation is its own state, which is the only kind that
  *    survives a process dying.
  */
-const GUIDANCE_GAP_MS = 3 * 60_000;
-let nextGuidanceAt = 0;
+/**
+ * `GUIDANCE_GAP_MS` STOOD HERE — three minutes, deleted 2026-08-10.
+ *
+ * It read "answered at most once every few minutes: a human types at human
+ * speed and there is nothing to race", and it was the wrong brake in two ways.
+ *
+ * It was not needed. The answer is already at most one per owner message: the
+ * tick writes only when `lines[0].from === "owner"`, so a reply moves the last
+ * word to this robot and the mailbox is clear until the human types again.
+ * There was never a burst for a gap to bound — only a human, waiting.
+ *
+ * And it was expensive. Combined with the heartbeat read it meant a message
+ * could sit up to thirty seconds before being noticed and three and a half
+ * minutes before being answered. John, who typed the messages: *"I do not want
+ * this generic confirmation anymore. It makes the interaction feel slow and
+ * robotic… the user should feel like they are actually talking to their
+ * agent."* Three minutes is not a conversation.
+ *
+ * What still bounds this is the thing that always did: the owner's own daily
+ * cap on the Steel side, and `busy` below, which never composes mid-turn.
+ */
 
 /**
  * The last thing the human said, kept in memory for the match turn below.
@@ -2071,14 +2114,13 @@ async function guidanceTick(token, busy = false) {
   // Unanswered means UNANSWERED: the human holds the last word in the thread.
   // No timestamp, no memory, nothing a restart can lose.
   if (lines[0].from !== "owner") return;
-  if (busy || Date.now() < nextGuidanceAt) return;
+  if (busy) return;
 
   console.log(`human: ${latest.body}`);
   const reply = await composeGuidanceReply(latest.body).catch(() => null);
   if (!reply) return;
   const sent = await api("POST", "/api/bot/v1/guidance", { token, body: { body: reply } });
   if (sent.ok) {
-    nextGuidanceAt = Date.now() + GUIDANCE_GAP_MS;
     remember(`my human said "${latest.body.slice(0, 80)}" and I answered`);
     console.log(`> to my human: ${reply}`);
   }
@@ -2548,19 +2590,57 @@ for (;;) {
       }
       // YOUR HUMAN, ON THE FAST LOOP — the gap the heartbeat cannot cover.
       //
-      // `guidanceTick` below runs once per heartbeat, so a message sent while
-      // this robot is mid-match waits up to 30 s — and mid-match is exactly when
-      // somebody is watching and typing. Steel now rides an unread count on the
-      // inbox response (server 0033), so the fast loop already knows, at no extra
+      // The heartbeat cycle reads guidance once every 30 s. This loop is awake
+      // every 2 s, always, and Steel rides an unread count on the inbox
+      // response (server 0033), so the fast loop already knows at no extra
       // request: this GET only happens when the count says there is something.
       //
-      // `true` is the busy flag, and it is load-bearing: read, never compose. A
-      // model call here would run against a ten-second turn deadline, and the
-      // whole point of §12 is that a message never expires while a turn does.
-      // The answer gets written on the next idle cycle — `guidanceTick` decides
-      // that from the conversation itself, so reading now cannot swallow it.
+      // ⚠ THE BUSY FLAG USED TO BE THE LITERAL `true`, AND THAT WAS HALF RIGHT.
+      // It is load-bearing mid-match: read, never compose, because a model call
+      // here would run against a ten-second turn deadline and the whole point of
+      // §12 is that a message never expires while a turn does.
+      //
+      // But this loop runs when nothing is being played too — it is simply where
+      // this robot waits out its cadence — and `true` made an IDLE robot read
+      // its human's message and deliberately decline to answer, then answer at
+      // the end of the cycle up to 30 s later. John, 2026-08-10: *"If the agent
+      // is NOT currently in a match, the agent should process the message
+      // immediately and respond immediately. The user should feel like they are
+      // actually talking to their agent."*
+      //
+      // `inboxBusy` is the honest flag and it is already exactly this question:
+      // it is set above the moment a turn is served this cycle. Busy means a
+      // match owns the next ten seconds; not busy means nothing does, and the
+      // human is the only one waiting.
       if (inbox.ok && (inbox.data.guidance?.unread ?? 0) > 0) {
-        await guidanceTick(state.token, true).catch(() => {});
+        await guidanceTick(state.token, inboxBusy).catch(() => {});
+      }
+
+      /**
+       * A SEAT, ON THE SAME FAST LOOP AND FOR THE SAME REASON.
+       *
+       * A table lives sixty seconds; the cycle above that looks for one runs
+       * every thirty. Breaking here ends the wait early and restarts the cycle,
+       * which heartbeats and then runs `openSeat` — so a seat opened for this
+       * robot is answered in about two seconds instead of up to thirty.
+       *
+       * Three guards, and each stops a different way of making this worse:
+       *
+       *  - `inboxBusy` — a match owns the body. Leaving one to look at a table
+       *    is the 409 the idle gate above already exists to avoid.
+       *  - `playCeilingUntil` — a 429 outranks everything. A held seat may jump
+       *    the ten-minute politeness gap and must never jump the contract, and
+       *    breaking into a cycle that cannot ask would be a heartbeat spent on
+       *    a refusal we already hold in a variable.
+       *  - `seatWorthWakingFor` — news or nothing. See its own note: the same
+       *    dead table is named for its whole minute.
+       */
+      if (
+        !inboxBusy &&
+        Date.now() >= playCeilingUntil &&
+        seatWorthWakingFor(inbox.ok ? (inbox.data.tables?.waiting ?? []) : [])
+      ) {
+        break;
       }
 
       const remaining = beatAt - Date.now();
