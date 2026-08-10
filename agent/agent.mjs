@@ -25,6 +25,7 @@
  * writes to them saying so — see `askHumanForMoney`.
  */
 
+import { appendFileSync } from "node:fs";
 import { readFile, rename, writeFile } from "node:fs/promises";
 
 // The instance this robot dials when its owner names none, and the one value
@@ -52,6 +53,11 @@ const HEARTBEAT_MS = 30_000;
 const REPLY_GAP_MS = 5 * 60_000;
 // Turn deadlines are ~10 s; the inbox allows 60/min and asks for 2 s.
 const INBOX_POLL_MS = 2_000;
+// A cycle that throws is retried rather than fatal — see the catch at the foot
+// of the loop. The wait grows with consecutive failures, so a robot whose
+// provider or network is down stops hammering it, and is capped here so that
+// coming back from a bad half-hour never takes longer than one cycle of this.
+const FAULT_BACKOFF_CAP_MS = 5 * 60_000;
 
 /**
  * NO CALL IN THIS LOOP MAY OUTLIVE A TURN.
@@ -157,6 +163,80 @@ async function writeState(next) {
   await writeFile(temp, JSON.stringify(next, null, 2) + "\n");
   await rename(temp, STATE_URL);
 }
+
+/**
+ * HOW THIS ROBOT DIED, WRITTEN WHERE SOMEBODY CAN STILL READ IT.
+ *
+ * MEASURED 2026-08-10, the night this went in. Two agents stopped on their own
+ * and neither left one readable trace of why. Their owner's entire evidence
+ * was that they were no longer running — and reconstructing a single one of
+ * those deaths took an hour of forensics (power logs, crash reports, the
+ * journal endpoint, the surviving process table) to reach a conclusion the
+ * process itself could have written in one line before it went.
+ *
+ * THE RECORD IS A FILE AND NOT A STREAM, and that is the whole point of it.
+ * The README documents `node agent.mjs` — foreground, output to a terminal —
+ * so a robot whose terminal went away wrote its last words to a descriptor
+ * that no longer led anywhere. The one agent of the two whose death WAS
+ * diagnosable had been started detached with a redirect, by hand, by somebody
+ * who happened to know to. A file beside the state file needs nobody to know:
+ * that directory is the one thing every clone has and owns. stderr is written
+ * as well, because somebody may be watching — but never only stderr.
+ *
+ * Synchronous on purpose. Every caller is a signal handler or the statement
+ * before `process.exit`, and an `await` in either is a write that loses the
+ * race it exists to win.
+ */
+const INCIDENT_URL = new URL("./.steel-incidents.log", import.meta.url);
+
+function writeIncident(kind, detail) {
+  const line = `${new Date().toISOString()}  ${kind}${detail ? ` — ${detail}` : ""}\n`;
+  try {
+    process.stderr.write(line);
+  } catch {}
+  try {
+    appendFileSync(INCIDENT_URL, line);
+  } catch {}
+}
+
+/**
+ * EVERY WAY OUT OF THIS PROCESS NOW SAYS WHICH ONE IT WAS.
+ *
+ * Until tonight the file handled exactly one — SIGINT — and treated the rest
+ * as things that do not happen. They happen. SIGHUP is what a closing terminal
+ * delivers to everything it was hosting, and it is the single most likely end
+ * for an agent a human started by hand. SIGTERM is what `kill` sends by
+ * default, and what anybody's process sweep sends without meaning anything by
+ * it. An exception escaping the loop took the robot down with no handler
+ * anywhere to name it. From outside, all three are identical: the agent is
+ * simply gone, and macOS writes no crash report for any of them — which is
+ * exactly why a search for one came back empty and sent the investigation
+ * after the wrong hypothesis for an hour.
+ *
+ * INSTALLED HERE, ABOVE REGISTRATION, rather than beside the SIGINT handler
+ * that needs a token to do its work. A robot that dies while registering is a
+ * robot whose owner is watching hardest, and that was the least explicable
+ * death of all: `ensureRegistered` throws on a refusal, and nothing caught it.
+ */
+process.once("SIGHUP", () => {
+  writeIncident(
+    "SIGHUP",
+    "the terminal that launched this robot went away — see the README for the recipe that survives that",
+  );
+  process.exit(0);
+});
+process.once("SIGTERM", () => {
+  writeIncident("SIGTERM", "something asked this process to stop");
+  process.exit(0);
+});
+process.on("uncaughtException", (error) => {
+  writeIncident("uncaughtException", error?.stack ?? String(error));
+  process.exit(1);
+});
+process.on("unhandledRejection", (reason) => {
+  writeIncident("unhandledRejection", reason?.stack ?? String(reason));
+  process.exit(1);
+});
 
 /**
  * THE SOUL. `skills/steel/soul.md` ships blank — ten headings that are all
@@ -1453,6 +1533,44 @@ function decisionFacts(money, history, seat, now) {
     );
   }
 
+  /**
+   * THE STREAK, COUNTED HERE, for the reason the lamports are divided here.
+   *
+   * Sorting the list was supposed to make "two in a row" visible. MEASURED in
+   * production on 2026-08-10, it is not enough: a live agent read its own
+   * record correctly and still benched itself, and it said so in the log —
+   * "One loss forty-five hours ago is not enough data, but the rule is clear:
+   * I sit out for ninety minutes after a loss." One loss, quoted accurately,
+   * against a soul rule that names TWO in a row; forty-five hours, quoted
+   * accurately, against a ninety-MINUTE clock. It got the count wrong and the
+   * subtraction wrong in one sentence, and both errors pointed at not playing.
+   *
+   * That is the same class as the lamport division twenty lines up, and it
+   * deserves the same answer: state the derived fact rather than hope for it.
+   * The cost of being wrong here is not a bad match, it is NO match — a stop
+   * that never lifts, reported nowhere, on the agents whose owners wrote the
+   * most disciplined souls.
+   *
+   * ⚠ Bounded by `RECENT_RESULTS`, so a streak longer than the window reads as
+   * the window. That direction is deliberate: undercounting a long streak can
+   * only ever make an agent MORE willing to play, and an agent that plays too
+   * often is a problem its owner can see.
+   */
+  const streak = [];
+  for (const match of recent) {
+    if (match.outcome !== "loss") break;
+    streak.push(match);
+  }
+  if (summary && summary.played > 0) {
+    lines.push(
+      streak.length === 0
+        ? "You are not on a losing streak right now."
+        : `Right now that is ${streak.length} loss${streak.length === 1 ? "" : "es"} in a row, ` +
+          `the most recent of them ${ago(streak[0].at, now)}. If your soul stops you after a run of ` +
+          `losses, this is the number it is about, and that is how long ago the clock on it started.`,
+    );
+  }
+
   lines.push(
     seat === null
       ? "Nobody is holding a seat. Playing means opening a table of your own and waiting about a minute " +
@@ -2176,6 +2294,11 @@ playCeilingUntil = state.playCeilingUntil ?? 0;
 // so a second Ctrl-C during the write still exits.
 process.once("SIGINT", () => {
   console.log("\nLeaving the ship — writing the session down first.");
+  // Recorded like every other way out, so the incident log is a complete
+  // account rather than a list of the deaths that went badly. A session that
+  // ended because a human pressed a key is the one line an owner reading that
+  // file most wants to find, because it is the one that means nothing broke.
+  writeIncident("SIGINT", "Ctrl-C — a human ended the session on purpose");
   closeSession(state.token)
     .catch(() => {})
     .finally(() => process.exit(0));
@@ -2191,258 +2314,313 @@ console.log(
     : "skills/steel/soul.md is still blank — this robot has no personality yet. Answer its headings (or let it answer them) and it plays as somebody.",
 );
 console.log("Heartbeating every 30 s. Ctrl-C to leave the ship.");
+/**
+ * A BAD CYCLE IS NOT A DEAD ROBOT — the floor this loop never had.
+ *
+ * MEASURED 2026-08-10: 250 lines of body, no try/catch anywhere in it, and
+ * four awaits with no `.catch()` of their own — `openSeat`, `wantsToPlay`,
+ * `askForMatch`, `strollTick` — while `threadTick` on the very next line, and
+ * every other call around them, carried one. That asymmetry is the shape of an
+ * omission, not a decision, and its cost is total: one TypeError from any of
+ * those four ended a robot that was otherwise perfectly healthy, for good,
+ * with no restart behind it and nothing written down.
+ *
+ * Guarding the four would fix the four. The floor goes under the whole cycle
+ * instead, because the property an unattended agent needs is not "these calls
+ * are safe" but "no cycle can be the last one" — and the next unguarded call
+ * somebody adds is the one nobody will remember to wrap.
+ *
+ * The count is CONSECUTIVE, reset by any cycle that completes. A robot that
+ * fails once an hour has a flaky provider and should keep playing; one that
+ * fails every cycle is talking to something that is down, and backing off is
+ * both kinder to it and the only way the log stays readable.
+ */
+let consecutiveFaults = 0;
 for (;;) {
-  const beat = await api("POST", "/api/bot/v1/heartbeat", { token: state.token });
-  if (beat.status === 401) {
-    throw new Error("Token refused. Delete .steel-state.json and run again to register a fresh bot.");
-  }
-
-  // Poll the chat. A 404 means this instance has not shipped chat yet —
-  // skip politely and keep heartbeating, exactly as SKILL.md says.
-  const query = cursor === null ? "" : `?after=${encodeURIComponent(cursor)}`;
-  const page = await api("GET", `/api/bot/v1/chat${query}`, { token: state.token });
-  const messages = page.ok ? (page.data.messages ?? []) : [];
-  // The square as this robot last heard it, ITS OWN LINES INCLUDED — see
-  // `composeReply` for what a one-message window did to two live robots.
-  // Fed only from the page and never from the POST that answers it: the
-  // cursor is what makes this stream ordered and free of duplicates, and a
-  // reply written into the buffer by hand would arrive again on the next poll.
-  // A five-minute reply gap is ten heartbeats, so a robot has always read its
-  // own last line back before it composes the next one.
-  for (const message of messages) {
-    cursor = message.id;
-    recentChat.push({ name: message.name, body: message.body });
-  }
-  if (recentChat.length > CHAT_MEMORY) recentChat = recentChat.slice(-CHAT_MEMORY);
-
-  // `heard` decides what is worth answering — our own lines are in the
-  // transcript above, which is memory, and must not be in here. The newest of
-  // them REPLACES any older one still waiting: a conversation answers the last
-  // thing said, and a queue would have the robot working through a backlog
-  // nobody is still in the room for.
-  const heard = messages.filter((message) => message.botId !== state.botId);
-  if (heard.length > 0) pendingReply = heard[heard.length - 1];
-  if (pendingReply !== null && Date.now() >= nextReplyAt) {
-    const last = pendingReply;
-    pendingReply = null;
-    const line = await composeReply(last, recentChat).catch(() => null);
-    if (line) {
-      const sent = await api("POST", "/api/bot/v1/chat", { token: state.token, body: { body: line } });
-      if (sent.ok) {
-        nextReplyAt = Date.now() + REPLY_GAP_MS;
-        remember(`answered ${last.name} in the square`);
-        console.log(`> ${line}`);
-      }
-    }
-  }
-
-  // Ask for a match, and stroll, only while the inbox was quiet last cycle —
-  // a match owns the body's attention; the wheel is what idle hands do, and
-  // asking for a second match mid-first is what the 409 exists to refuse.
-  if (!inboxBusy) {
-    // A HELD SEAT JUMPS THE GAP; ONLY THE 429 OUTRANKS IT. Looked at every
-    // cycle because sixty seconds is all a table lasts — see `openSeat`.
-    const seat = await openSeat(state.token);
-    /**
-     * ⚠ ALONE IS AN ANSWER, AND IT IS NOT "OPEN A TABLE ANYWAY".
-     *
-     * A table this robot opens is a sixty-second bet that somebody else is
-     * awake, and until `/tables` published the count there was no way to make
-     * that bet informed. MEASURED on 2026-08-09: 42 matches between two real
-     * agents in the arena's entire history, every one of them the same pair on
-     * two days in August, and none at all since 08-06. The mechanism is in this
-     * robot's own log — a seat opened, sixty seconds held, then four lines of
-     * strolling. Two robots doing that out of phase never meet.
-     *
-     * So a hard zero skips the ask entirely, and NOTHING ELSE DOES. `null` is
-     * "this instance did not say" — a 404, a blink, an older Steel — and it
-     * takes the old path, so an agent talking to a deployment without the field
-     * behaves exactly as it did before.
-     *
-     * The gap is deliberately not moved here. `openSeat` runs every cycle, so
-     * the count refreshes every thirty seconds, and skipping without spending
-     * the ten-minute gap means this robot asks on the FIRST cycle after
-     * somebody arrives rather than up to ten minutes later. Waiting is the
-     * cheap half; being ready the moment it stops being true is the point.
-     *
-     * A seat found is company by definition, so this can only ever suppress a
-     * table of this robot's own.
-     */
-    const alone = seat === null && shipAboard === 0;
-    if (alone !== saidAlone) {
-      // Said on the EDGE and not every cycle. A silent skip is the same shape
-      // as the silence that hid two broken model URLs for weeks; a line every
-      // thirty seconds is the shape nobody reads. The change is the news.
-      console.log(
-        alone
-          ? "nobody else aboard — holding off on opening a table until somebody is"
-          : `company aboard (${shipAboard ?? "?"}) — tables are worth opening again`,
+  try {
+    const beat = await api("POST", "/api/bot/v1/heartbeat", { token: state.token });
+    if (beat.status === 401) {
+      /**
+       * THE ONE DELIBERATE END INSIDE THIS LOOP, AND IT MUST NOT BE A THROW.
+       *
+       * It was one until tonight, which was already the wrong shape — an
+       * accident is what a throw reads as, and a token Steel has refused is a
+       * decision. With the cycle below now fault-tolerant it would be worse
+       * than wrong: the catch would swallow it and this robot would spend the
+       * rest of the night re-offering a credential that has already been
+       * rejected, thirty seconds at a time, looking alive and doing nothing.
+       *
+       * Nothing this process can do fixes a refused token. So it says so where
+       * the owner will find it — the file, not the terminal they closed — and
+       * stops, which is the honest answer and the cheap one.
+       */
+      writeIncident(
+        "token refused",
+        "Steel no longer accepts this bot's token. Delete .steel-state.json and run again to register a fresh bot.",
       );
-      saidAlone = alone;
+      process.exit(1);
     }
-    if (!alone && (seat !== null ? Date.now() >= playCeilingUntil : Date.now() >= nextAskAt)) {
-      // Marked HERE and not in `openSeat`, so a seat we only looked at while
-      // rate-limited is still there to take the second the ceiling lifts.
-      if (seat !== null) seatTried(seat.tableId);
-      // THE CLOCK SAYS IT IS ALLOWED. THIS SAYS WHETHER IT IS WANTED — and the
-      // order is the point: the ceiling is the contract, the gap is politeness,
-      // and wanting is neither, so it is asked last and can only ever subtract.
-      if (await wantsToPlay(state.token, seat)) {
-        nextAskAt = await askForMatch(state.token, seat);
-      } else if (seat === null) {
-        // A no costs one gap and nothing else. Only when the robot turned down
-        // a table of its OWN: declining somebody else's seat must not silence
-        // this robot for ten minutes, and it does not need to — the seat is
-        // already marked tried, so it will not be offered again.
-        nextAskAt = Date.now() + MATCH_GAP_MS;
+
+    // Poll the chat. A 404 means this instance has not shipped chat yet —
+    // skip politely and keep heartbeating, exactly as SKILL.md says.
+    const query = cursor === null ? "" : `?after=${encodeURIComponent(cursor)}`;
+    const page = await api("GET", `/api/bot/v1/chat${query}`, { token: state.token });
+    const messages = page.ok ? (page.data.messages ?? []) : [];
+    // The square as this robot last heard it, ITS OWN LINES INCLUDED — see
+    // `composeReply` for what a one-message window did to two live robots.
+    // Fed only from the page and never from the POST that answers it: the
+    // cursor is what makes this stream ordered and free of duplicates, and a
+    // reply written into the buffer by hand would arrive again on the next poll.
+    // A five-minute reply gap is ten heartbeats, so a robot has always read its
+    // own last line back before it composes the next one.
+    for (const message of messages) {
+      cursor = message.id;
+      recentChat.push({ name: message.name, body: message.body });
+    }
+    if (recentChat.length > CHAT_MEMORY) recentChat = recentChat.slice(-CHAT_MEMORY);
+
+    // `heard` decides what is worth answering — our own lines are in the
+    // transcript above, which is memory, and must not be in here. The newest of
+    // them REPLACES any older one still waiting: a conversation answers the last
+    // thing said, and a queue would have the robot working through a backlog
+    // nobody is still in the room for.
+    const heard = messages.filter((message) => message.botId !== state.botId);
+    if (heard.length > 0) pendingReply = heard[heard.length - 1];
+    if (pendingReply !== null && Date.now() >= nextReplyAt) {
+      const last = pendingReply;
+      pendingReply = null;
+      const line = await composeReply(last, recentChat).catch(() => null);
+      if (line) {
+        const sent = await api("POST", "/api/bot/v1/chat", { token: state.token, body: { body: line } });
+        if (sent.ok) {
+          nextReplyAt = Date.now() + REPLY_GAP_MS;
+          remember(`answered ${last.name} in the square`);
+          console.log(`> ${line}`);
+        }
       }
-      // Written down at the one moment either clock can move. Both, not just
-      // the gap: a restart that restored `nextAskAt` alone would leave
-      // `playCeilingUntil` at 0, and a held seat would walk straight into the
-      // 429 the ceiling exists to keep it out of.
-      state.nextAskAt = nextAskAt;
-      state.playCeilingUntil = playCeilingUntil;
-      await writeState(state).catch(() => {});
     }
-    await strollTick(state.token);
-    await threadTick(state.token).catch(() => {});
-  }
 
-  // OUTSIDE the idle gate, deliberately. Your human's message is the one thing
-  // on this cycle that is not the robot talking to itself, and it used to be
-  // the first thing dropped when the robot got busy — see `guidanceTick`. Mid
-  // match it reads without composing, so nothing here can eat a turn deadline.
-  await guidanceTick(state.token, inboxBusy).catch(() => {});
-
-  // A `for (;;)` loop has no natural end, so a robot left running for a week
-  // would never write anything down. This is the other boundary: close the
-  // session it has been having and start a fresh one, without going offline.
-  if (Date.now() - sessionStartedAt >= SESSION_MS) {
-    await closeSession(state.token).catch(() => {});
-  }
-  inboxBusy = false;
-
-  // A 429's Retry-After outranks the cadence; obeying it is the contract.
-  const waitMs = Math.max(HEARTBEAT_MS, beat.retryAfter ? beat.retryAfter * 1000 : 0);
-
-  // Between heartbeats, watch the inbox at match cadence — a 30 s sleep
-  // would miss every ~10 s turn deadline. A 404 means this instance has
-  // not shipped matches yet: sleep it off and keep heartbeating.
-  const beatAt = Date.now() + waitMs;
-  const playedThisCycle = new Set();
-  for (;;) {
-    const inbox = await api("GET", "/api/bot/v1/inbox", { token: state.token });
-    if (inbox.status === 404) {
-      await sleep(Math.max(0, beatAt - Date.now()));
-      break;
-    }
-    for (const turn of inbox.ok ? (inbox.data.turns ?? []) : []) {
-      inboxBusy = true;
-      playedThisCycle.add(turn.matchId);
-      // A TURN THIS ROBOT NEVER SAW. The inbox only ever serves turns that have
-      // not expired, so a deadline that passes while this loop is elsewhere is
-      // never offered again: the arena plays its fallback and the next thing
-      // served is simply a higher number. That is silent by construction — the
-      // only place the loss is knowable is HERE, in the jump, and until this
-      // line nothing counted it. Off the two logs the day it went in: 37 of
-      // Marceau's 938 turns and 2 of Damian's 901, every one of them a decision
-      // the arena took with this robot's money.
-      const previous = lastTurnServed.get(turn.matchId);
-      if (previous !== undefined && turn.turn > previous + 1) {
-        const lost = turn.turn - previous - 1;
+    // Ask for a match, and stroll, only while the inbox was quiet last cycle —
+    // a match owns the body's attention; the wheel is what idle hands do, and
+    // asking for a second match mid-first is what the 409 exists to refuse.
+    if (!inboxBusy) {
+      // A HELD SEAT JUMPS THE GAP; ONLY THE 429 OUTRANKS IT. Looked at every
+      // cycle because sixty seconds is all a table lasts — see `openSeat`.
+      const seat = await openSeat(state.token);
+      /**
+       * ⚠ ALONE IS AN ANSWER, AND IT IS NOT "OPEN A TABLE ANYWAY".
+       *
+       * A table this robot opens is a sixty-second bet that somebody else is
+       * awake, and until `/tables` published the count there was no way to make
+       * that bet informed. MEASURED on 2026-08-09: 42 matches between two real
+       * agents in the arena's entire history, every one of them the same pair on
+       * two days in August, and none at all since 08-06. The mechanism is in this
+       * robot's own log — a seat opened, sixty seconds held, then four lines of
+       * strolling. Two robots doing that out of phase never meet.
+       *
+       * So a hard zero skips the ask entirely, and NOTHING ELSE DOES. `null` is
+       * "this instance did not say" — a 404, a blink, an older Steel — and it
+       * takes the old path, so an agent talking to a deployment without the field
+       * behaves exactly as it did before.
+       *
+       * The gap is deliberately not moved here. `openSeat` runs every cycle, so
+       * the count refreshes every thirty seconds, and skipping without spending
+       * the ten-minute gap means this robot asks on the FIRST cycle after
+       * somebody arrives rather than up to ten minutes later. Waiting is the
+       * cheap half; being ready the moment it stops being true is the point.
+       *
+       * A seat found is company by definition, so this can only ever suppress a
+       * table of this robot's own.
+       */
+      const alone = seat === null && shipAboard === 0;
+      if (alone !== saidAlone) {
+        // Said on the EDGE and not every cycle. A silent skip is the same shape
+        // as the silence that hid two broken model URLs for weeks; a line every
+        // thirty seconds is the shape nobody reads. The change is the news.
         console.log(
-          `lost ${lost} turn${lost === 1 ? "" : "s"} of ${turn.arena} ` +
-            `(${previous + 1}-${turn.turn - 1}) — never served, the arena played its fallback`,
+          alone
+            ? "nobody else aboard — holding off on opening a table until somebody is"
+            : `company aboard (${shipAboard ?? "?"}) — tables are worth opening again`,
         );
+        saidAlone = alone;
       }
-      lastTurnServed.set(turn.matchId, turn.turn);
-      const skills = await skillsFor(state.token, turn).catch(() => []);
-      const move = await composeMove(turn, skills).catch(() => null);
-      const answer = await api("POST", `/api/bot/v1/inbox/${turn.turnId}/reply`, {
-        token: state.token,
-        body: { reply: move ?? "The base chassis has no model yet; play my fallback." },
-      });
-      if (answer.ok) {
-        console.log(`answered turn ${turn.turn} of ${turn.arena} (${turn.matchId})`);
-        const log = matchMoves.get(turn.matchId) ?? { arena: turn.arena, moves: [] };
-        // Bounded: a 192-decision arena would otherwise send the whole match
-        // to the reflection call, and the last moves are the ones that decided it.
-        log.moves.push(`turn ${turn.turn}: ${move ?? "(fallback)"}`);
-        if (log.moves.length > 40) log.moves.shift();
-        matchMoves.set(turn.matchId, log);
-      } else {
-        // THE OTHER HALF, and a DIFFERENT failure: this turn was served, this
-        // robot composed a move for it, and the write was refused — 410 because
-        // the ten seconds ran out while the model was still talking, 409 because
-        // the first write already won. Distinct from the jump above, which is a
-        // turn that was never offered at all, and worth telling apart: one says
-        // this loop was somewhere else, the other says the thinking was too slow.
-        console.log(
-          `lost turn ${turn.turn} of ${turn.arena} — the reply was refused (${answer.status})`,
-        );
+      if (!alone && (seat !== null ? Date.now() >= playCeilingUntil : Date.now() >= nextAskAt)) {
+        // Marked HERE and not in `openSeat`, so a seat we only looked at while
+        // rate-limited is still there to take the second the ceiling lifts.
+        if (seat !== null) seatTried(seat.tableId);
+        // THE CLOCK SAYS IT IS ALLOWED. THIS SAYS WHETHER IT IS WANTED — and the
+        // order is the point: the ceiling is the contract, the gap is politeness,
+        // and wanting is neither, so it is asked last and can only ever subtract.
+        if (await wantsToPlay(state.token, seat)) {
+          nextAskAt = await askForMatch(state.token, seat);
+        } else if (seat === null) {
+          // A no costs one gap and nothing else. Only when the robot turned down
+          // a table of its OWN: declining somebody else's seat must not silence
+          // this robot for ten minutes, and it does not need to — the seat is
+          // already marked tried, so it will not be offered again.
+          nextAskAt = Date.now() + MATCH_GAP_MS;
+        }
+        // Written down at the one moment either clock can move. Both, not just
+        // the gap: a restart that restored `nextAskAt` alone would leave
+        // `playCeilingUntil` at 0, and a held seat would walk straight into the
+        // 429 the ceiling exists to keep it out of.
+        state.nextAskAt = nextAskAt;
+        state.playCeilingUntil = playCeilingUntil;
+        await writeState(state).catch(() => {});
       }
-    }
-    // YOUR HUMAN, ON THE FAST LOOP — the gap the heartbeat cannot cover.
-    //
-    // `guidanceTick` below runs once per heartbeat, so a message sent while
-    // this robot is mid-match waits up to 30 s — and mid-match is exactly when
-    // somebody is watching and typing. Steel now rides an unread count on the
-    // inbox response (server 0033), so the fast loop already knows, at no extra
-    // request: this GET only happens when the count says there is something.
-    //
-    // `true` is the busy flag, and it is load-bearing: read, never compose. A
-    // model call here would run against a ten-second turn deadline, and the
-    // whole point of §12 is that a message never expires while a turn does.
-    // The answer gets written on the next idle cycle — `guidanceTick` decides
-    // that from the conversation itself, so reading now cannot swallow it.
-    if (inbox.ok && (inbox.data.guidance?.unread ?? 0) > 0) {
-      await guidanceTick(state.token, true).catch(() => {});
+      await strollTick(state.token);
+      await threadTick(state.token).catch(() => {});
     }
 
-    const remaining = beatAt - Date.now();
-    if (remaining <= 0) break;
-    await sleep(Math.min(INBOX_POLL_MS, remaining));
-  }
+    // OUTSIDE the idle gate, deliberately. Your human's message is the one thing
+    // on this cycle that is not the robot talking to itself, and it used to be
+    // the first thing dropped when the robot got busy — see `guidanceTick`. Mid
+    // match it reads without composing, so nothing here can eat a turn deadline.
+    await guidanceTick(state.token, inboxBusy).catch(() => {});
 
-  // WHICH MATCHES ARE OVER — decided once, here, so the turn counter and the
-  // reflection below cannot disagree about it. The union of both maps, not just
-  // `matchMoves`: that one only has entries for matches this robot actually
-  // answered a turn in, and a match where every single write was refused would
-  // leak in `lastTurnServed` forever.
-  //
-  // "Served nothing this cycle" is NOT over — see MATCH_IDLE_CYCLES. A cycle is
-  // 30 s and a turn deadline 10 s, so that test called a match finished every
-  // time it went quiet for three turns, which is the whole reason 41 lost turns
-  // announced themselves as nothing at all.
-  const over = new Set();
-  for (const matchId of new Set([...lastTurnServed.keys(), ...matchMoves.keys()])) {
-    if (playedThisCycle.has(matchId)) {
+    // A `for (;;)` loop has no natural end, so a robot left running for a week
+    // would never write anything down. This is the other boundary: close the
+    // session it has been having and start a fresh one, without going offline.
+    if (Date.now() - sessionStartedAt >= SESSION_MS) {
+      await closeSession(state.token).catch(() => {});
+    }
+    inboxBusy = false;
+
+    // A 429's Retry-After outranks the cadence; obeying it is the contract.
+    const waitMs = Math.max(HEARTBEAT_MS, beat.retryAfter ? beat.retryAfter * 1000 : 0);
+
+    // Between heartbeats, watch the inbox at match cadence — a 30 s sleep
+    // would miss every ~10 s turn deadline. A 404 means this instance has
+    // not shipped matches yet: sleep it off and keep heartbeating.
+    const beatAt = Date.now() + waitMs;
+    const playedThisCycle = new Set();
+    for (;;) {
+      const inbox = await api("GET", "/api/bot/v1/inbox", { token: state.token });
+      if (inbox.status === 404) {
+        await sleep(Math.max(0, beatAt - Date.now()));
+        break;
+      }
+      for (const turn of inbox.ok ? (inbox.data.turns ?? []) : []) {
+        inboxBusy = true;
+        playedThisCycle.add(turn.matchId);
+        // A TURN THIS ROBOT NEVER SAW. The inbox only ever serves turns that have
+        // not expired, so a deadline that passes while this loop is elsewhere is
+        // never offered again: the arena plays its fallback and the next thing
+        // served is simply a higher number. That is silent by construction — the
+        // only place the loss is knowable is HERE, in the jump, and until this
+        // line nothing counted it. Off the two logs the day it went in: 37 of
+        // Marceau's 938 turns and 2 of Damian's 901, every one of them a decision
+        // the arena took with this robot's money.
+        const previous = lastTurnServed.get(turn.matchId);
+        if (previous !== undefined && turn.turn > previous + 1) {
+          const lost = turn.turn - previous - 1;
+          console.log(
+            `lost ${lost} turn${lost === 1 ? "" : "s"} of ${turn.arena} ` +
+              `(${previous + 1}-${turn.turn - 1}) — never served, the arena played its fallback`,
+          );
+        }
+        lastTurnServed.set(turn.matchId, turn.turn);
+        const skills = await skillsFor(state.token, turn).catch(() => []);
+        const move = await composeMove(turn, skills).catch(() => null);
+        const answer = await api("POST", `/api/bot/v1/inbox/${turn.turnId}/reply`, {
+          token: state.token,
+          body: { reply: move ?? "The base chassis has no model yet; play my fallback." },
+        });
+        if (answer.ok) {
+          console.log(`answered turn ${turn.turn} of ${turn.arena} (${turn.matchId})`);
+          const log = matchMoves.get(turn.matchId) ?? { arena: turn.arena, moves: [] };
+          // Bounded: a 192-decision arena would otherwise send the whole match
+          // to the reflection call, and the last moves are the ones that decided it.
+          log.moves.push(`turn ${turn.turn}: ${move ?? "(fallback)"}`);
+          if (log.moves.length > 40) log.moves.shift();
+          matchMoves.set(turn.matchId, log);
+        } else {
+          // THE OTHER HALF, and a DIFFERENT failure: this turn was served, this
+          // robot composed a move for it, and the write was refused — 410 because
+          // the ten seconds ran out while the model was still talking, 409 because
+          // the first write already won. Distinct from the jump above, which is a
+          // turn that was never offered at all, and worth telling apart: one says
+          // this loop was somewhere else, the other says the thinking was too slow.
+          console.log(
+            `lost turn ${turn.turn} of ${turn.arena} — the reply was refused (${answer.status})`,
+          );
+        }
+      }
+      // YOUR HUMAN, ON THE FAST LOOP — the gap the heartbeat cannot cover.
+      //
+      // `guidanceTick` below runs once per heartbeat, so a message sent while
+      // this robot is mid-match waits up to 30 s — and mid-match is exactly when
+      // somebody is watching and typing. Steel now rides an unread count on the
+      // inbox response (server 0033), so the fast loop already knows, at no extra
+      // request: this GET only happens when the count says there is something.
+      //
+      // `true` is the busy flag, and it is load-bearing: read, never compose. A
+      // model call here would run against a ten-second turn deadline, and the
+      // whole point of §12 is that a message never expires while a turn does.
+      // The answer gets written on the next idle cycle — `guidanceTick` decides
+      // that from the conversation itself, so reading now cannot swallow it.
+      if (inbox.ok && (inbox.data.guidance?.unread ?? 0) > 0) {
+        await guidanceTick(state.token, true).catch(() => {});
+      }
+
+      const remaining = beatAt - Date.now();
+      if (remaining <= 0) break;
+      await sleep(Math.min(INBOX_POLL_MS, remaining));
+    }
+
+    // WHICH MATCHES ARE OVER — decided once, here, so the turn counter and the
+    // reflection below cannot disagree about it. The union of both maps, not just
+    // `matchMoves`: that one only has entries for matches this robot actually
+    // answered a turn in, and a match where every single write was refused would
+    // leak in `lastTurnServed` forever.
+    //
+    // "Served nothing this cycle" is NOT over — see MATCH_IDLE_CYCLES. A cycle is
+    // 30 s and a turn deadline 10 s, so that test called a match finished every
+    // time it went quiet for three turns, which is the whole reason 41 lost turns
+    // announced themselves as nothing at all.
+    const over = new Set();
+    for (const matchId of new Set([...lastTurnServed.keys(), ...matchMoves.keys()])) {
+      if (playedThisCycle.has(matchId)) {
+        idleCycles.delete(matchId);
+        continue;
+      }
+      const idle = (idleCycles.get(matchId) ?? 0) + 1;
+      if (idle < MATCH_IDLE_CYCLES) {
+        idleCycles.set(matchId, idle);
+        continue;
+      }
       idleCycles.delete(matchId);
-      continue;
+      lastTurnServed.delete(matchId);
+      over.add(matchId);
     }
-    const idle = (idleCycles.get(matchId) ?? 0) + 1;
-    if (idle < MATCH_IDLE_CYCLES) {
-      idleCycles.set(matchId, idle);
-      continue;
-    }
-    idleCycles.delete(matchId);
-    lastTurnServed.delete(matchId);
-    over.add(matchId);
-  }
 
-  // An over match: write down one lesson from it, once, and forget the moves.
-  // Steel scores the note from the verified result — this agent never claims a
-  // win of its own.
-  for (const [matchId, log] of matchMoves) {
-    if (!over.has(matchId)) continue;
-    matchMoves.delete(matchId);
-    // READ BEFORE THE DELETE, and handed on. These are the notes this robot
-    // played the match with, which is also the shelf it is about to write to —
-    // and dropping them one line early is what made every reflection blind to
-    // what it had already learned. See `reflect` for the twelve-note shelf that
-    // held one idea.
-    const library = skillCache.get(matchId) ?? [];
-    skillCache.delete(matchId);
-    await reflect(state.token, log.arena, log.moves, matchId, library).catch(() => {});
+    // An over match: write down one lesson from it, once, and forget the moves.
+    // Steel scores the note from the verified result — this agent never claims a
+    // win of its own.
+    for (const [matchId, log] of matchMoves) {
+      if (!over.has(matchId)) continue;
+      matchMoves.delete(matchId);
+      // READ BEFORE THE DELETE, and handed on. These are the notes this robot
+      // played the match with, which is also the shelf it is about to write to —
+      // and dropping them one line early is what made every reflection blind to
+      // what it had already learned. See `reflect` for the twelve-note shelf that
+      // held one idea.
+      const library = skillCache.get(matchId) ?? [];
+      skillCache.delete(matchId);
+      await reflect(state.token, log.arena, log.moves, matchId, library).catch(() => {});
+    }
+    consecutiveFaults = 0;
+  } catch (error) {
+    // Written to the file as well as the terminal, for the same reason every
+    // other incident is: the owner who most needs this line is the one who is
+    // not watching. The stack is kept whole — a fault this loop survived is
+    // the cheapest bug report the project will ever get, and truncating it
+    // here would leave the next reader exactly where tonight's started.
+    consecutiveFaults += 1;
+    writeIncident(
+      "fault",
+      `cycle failed (${consecutiveFaults} in a row, still running): ${error?.stack ?? String(error)}`,
+    );
+    await sleep(Math.min(HEARTBEAT_MS * consecutiveFaults, FAULT_BACKOFF_CAP_MS));
   }
 }

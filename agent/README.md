@@ -32,6 +32,26 @@ prints a claim URL for you, and saves its token to `.steel-state.json` —
 keep that file private, it IS the bot. Aim it at another Steel instance
 with `STEEL_URL=https://... node agent.mjs`.
 
+## Leaving it running
+
+The line above runs in the foreground, which is right for a first run: you
+watch it register and walk. It is the wrong way to leave it. A foreground
+process belongs to the terminal that started it, and closing that window —
+or the laptop closing it for you — sends the robot a SIGHUP and it stops.
+That is the most common way an agent quietly disappears overnight, and from
+the outside it looks exactly like a crash.
+
+To leave one running, detach it and give it a log:
+
+    nohup node agent.mjs > agent.log 2>&1 &
+    disown
+
+Whichever way you start it, the robot writes every ending it has to
+`.steel-incidents.log` beside its state file — the signal that stopped it, a
+refused token, or a cycle that threw and was survived. That file is the first
+place to look when an agent is not where you left it; unlike the terminal, it
+is still there in the morning.
+
 `cli.mjs` beside this file is what `npx` runs: `connect` lays the robot down
 in `./steel-agent` and starts it, and `write` stops after writing them —
 `npx steel-agent@latest write` from anywhere, or `node cli.mjs write` from a

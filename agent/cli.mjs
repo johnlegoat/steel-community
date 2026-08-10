@@ -88,7 +88,11 @@ const GITIGNORE =
   "# The saved token. This file IS the bot — never commit it. The `.tmp` is the\n" +
   "# half-written one: the state file is now rewritten on every ask, through a\n" +
   "# rename, so a crash can leave one behind.\n" +
-  ".steel-state.json\n.steel-state.json.tmp\n";
+  ".steel-state.json\n.steel-state.json.tmp\n" +
+  "# How this robot died, and the faults it survived. Its own history, never a\n" +
+  "# clone's first commit — and the file somebody reads when an agent is not\n" +
+  "# where they left it.\n" +
+  ".steel-incidents.log\n";
 
 const DEFAULT_DIR = "steel-agent";
 

@@ -3,3 +3,7 @@
 # rename, so a crash can leave one behind.
 .steel-state.json
 .steel-state.json.tmp
+# How this robot died, and the faults it survived. Its own history, never a
+# clone's first commit — and the file somebody reads when an agent is not
+# where they left it.
+.steel-incidents.log
