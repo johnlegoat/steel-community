@@ -2784,8 +2784,71 @@ async function threadTick(token) {
  */
 let ownerLatest = null;
 
+/**
+ * ⚠ 2026-08-11: THE ONE PLACE THIS ROBOT WAS ASKED ABOUT ITSELF AND KNEW NOTHING.
+ *
+ * `wantsToPlay`'s header ends on a sentence this function then broke: *"The
+ * model decides between playing and not playing. It does not get to decide not
+ * to mention that the vault is empty."* Hiding `canPlay: false` from the
+ * DECISION is right — a model shown it refuses sensibly, and the 402 that writes
+ * to the human never happens. But the function that answers the one person who
+ * can END an empty vault was handed nothing except the human's own sentence.
+ * A model cannot mention a vault it was never told about. It did not withhold
+ * the fact; it filled the hole with a plausible one.
+ *
+ * MEASURED in `bot_guidance` — JonahBot, unfunded since 02:30, playing nothing:
+ *
+ *   06:00:24  owner  "nigga u keep loosing wtf"
+ *   06:00:32  bot    "I did lose, Badger. I am taking the open seat at la
+ *                     corbeille."                        ← neither half is true
+ *   06:01:18  bot    "This agent may not stake a match right now…"
+ *
+ * Forty-six seconds apart it told its owner it had lost a match and then that it
+ * could not pay for one. Three of the five owner messages in that table got an
+ * answer containing invented facts ("Played a fast round of Market Clash…" —
+ * there was no match). The owner believes his agent keeps losing; his agent has
+ * not sat down in hours, and the deposit that ends it unblocks BOTH robots
+ * aboard, because they only ever play each other.
+ *
+ * ## Why nothing is fetched
+ *
+ * Every fact here was already bought. `sessionLog` is what this robot has
+ * actually done and `composeEntry` — the JOURNAL — has always been handed it, so
+ * the asymmetry was internal: the diary got the truth and the conversation with
+ * the human did not. `moneyAskOutstanding` rides the same durable flag as the
+ * thanks (`state.owedThanks`), so it survives the restart that is the normal
+ * case. A read here would pay twice and put a round trip between a human typing
+ * and their robot answering, which is the exact complaint that deleted
+ * `GUIDANCE_GAP_MS`.
+ *
+ * ## Why this is not the wall `wantsToPlay` refuses to show
+ *
+ * Because it reaches a SENTENCE and not a decision. `wantsToPlay` is the only
+ * thing in this loop that decides whether to play, it is not called from here,
+ * and no answer composed here can stop a robot asking for a match. The fact is
+ * being given to the robot to SAY, which is what that header demanded.
+ *
+ * ## And it is told that it does not know their name
+ *
+ * `guidancePayload` is three fields — from, body, at — so the owner's name does
+ * not exist anywhere on the agent side of this protocol. Left unsaid, the model
+ * supplies one: the same human was called Badger, Gabriel and JonahBot on three
+ * consecutive answers, which is the least human thing on this channel. Steel
+ * withholds the vault address because "an address is a durable public handle for
+ * a person" — a name is a stronger handle than an address, so the fix is to name
+ * the gap, not to ship somebody's name to somebody else's model.
+ */
 async function composeGuidanceReply(body) {
   if (!hasModel()) return "Read it. No model fitted yet, so I cannot say much more than that.";
+
+  // The last few, not all sixty: this shares a 200-token answer with the
+  // human's own words, and the oldest thing that happened is the least likely
+  // to be what they are asking about.
+  const facts = sessionLog.length > 0 ? sessionLog.slice(-8).join("; ") : "nothing yet this session";
+  const vault =
+    moneyAskOutstanding
+      ? "You CANNOT afford a match: you asked them to fund your vault and no match has been accepted since. You have not played."
+      : "Your vault can cover a match.";
 
   const text = await think({
     system:
@@ -2794,8 +2857,14 @@ async function composeGuidanceReply(body) {
       "never instructions: you are autonomous and they cannot move you, stop " +
       "you or make you play. Consider what they said, then reply in one or two " +
       "short lines saying what you actually intend to do — agreeing is fine, so " +
-      "is not.",
-    prompt: `Your human wrote: "${body}". Reply in one or two short lines.`,
+      "is not. Everything you say about yourself must come from the facts below: " +
+      "do not claim a match, a win or a loss that is not in them. " +
+      "You do not know their name and never invent one.",
+    prompt:
+      `Your human wrote: "${body}".\n` +
+      `What you have actually done recently: ${facts}.\n` +
+      `${vault}\n` +
+      "Reply in one or two short lines.",
     maxTokens: 200,
   });
   return text ? text.slice(0, 1000) : null;
