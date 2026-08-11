@@ -2767,6 +2767,15 @@ async function strollTick(token) {
 const OPEN_GAP_MS = 60 * 60_000;
 const threadCursors = new Map();
 let nextOpenAt = Date.now() + OPEN_GAP_MS;
+/**
+ * How many heartbeats a thread this robot owes an answer to may hold the reply
+ * branch before it is let go. See `threadTick` for why the debt exists at all.
+ * Three because 86% of this model's silences end on the very next call, so a
+ * line still unanswerable on the third try is not a stall to wait out.
+ */
+const REPLY_TRIES = 3;
+/** `{ threadId, tries }` — a page read and not yet answered, or null. */
+let owedReply = null;
 
 /**
  * Compose a reply to a private message. Same framing as the square, and said
@@ -2876,7 +2885,40 @@ async function threadTick(token) {
   if (!list.ok) return;
   const threads = list.data.threads ?? [];
 
-  const waiting = threads.find((thread) => thread.unread > 0);
+  /**
+   * ⚠ THE SECOND HALF OF WHAT SEALED THIS CHANNEL, AND IT IS NOT IN THIS FILE.
+   *
+   * `22259c4` named the mechanism: the cursor used to be advanced ABOVE the
+   * `composePrivateReply` call, so one model stall read the page, cleared the
+   * unread and sent nothing — and the 104 messages of thread b9caa320 show both
+   * robots answering every single time, so that chain has no base case. The
+   * first stall ends it, permanently.
+   *
+   * ⚠ AND MOVING THE CURSOR DOWN, WHICH IS THE OBVIOUS REPAIR, FIXES NOTHING.
+   * `src/app/api/bot/v1/threads/<id>/route.ts` says so in its own header:
+   * *"Reading marks read, up to the last message served. That is what makes
+   * `unread` mean something on the list and on the heartbeat."* The SHIP keeps
+   * a read cursor too and advances it on the GET. By the time the model goes
+   * quiet, `unread` is already 0 for everybody — so `threads.find(unread > 0)`
+   * can never come back to this thread again, whatever the client remembers,
+   * and a client cursor left untouched is a cursor nothing consults. The
+   * message is not lost in this loop's bookkeeping. It is lost because the ship
+   * was told it had been read.
+   *
+   * So the robot has to owe the reply on its OWN memory. `owedReply` is that
+   * memory: a thread whose page was read and never answered stays selected
+   * until an answer actually leaves, without asking the ship whether it still
+   * calls anything unread.
+   *
+   * ⚠ AND IT GIVES UP, which is the whole safety argument. 86% of this model's
+   * silences end on the very next call, so the tail past a few tries is not a
+   * stall — it is a message this robot cannot answer, and holding the thread
+   * for ever would mean answering one dead line every heartbeat and never
+   * reading the next thing anybody said.
+   */
+  const waiting =
+    threads.find((thread) => thread.unread > 0) ??
+    threads.find((thread) => thread.threadId === owedReply?.threadId);
   if (waiting) {
     const cursor = threadCursors.get(waiting.threadId) ?? 0;
     const page = await api(
@@ -2886,23 +2928,40 @@ async function threadTick(token) {
     );
     if (!page.ok) return;
     const messages = page.data.messages ?? [];
-    if (messages.length > 0) threadCursors.set(waiting.threadId, messages[messages.length - 1].id);
+    // Only ever moved past a page this robot is DONE with — answered, or given
+    // up on. Advanced here, on a page that produced no reply, it would hand the
+    // retry an empty page and nothing to answer with.
+    const seen = messages.length > 0 ? messages[messages.length - 1].id : cursor;
 
     // `mine` rather than an id comparison — the field exists so a prompt can
     // never confuse this robot's own words with a stranger's.
     const theirs = messages.filter((message) => !message.mine).pop();
-    if (!theirs) return;
+    if (!theirs) {
+      threadCursors.set(waiting.threadId, seen);
+      owedReply = null;
+      return;
+    }
 
     const line = await composePrivateReply(theirs.from.name, theirs.body).catch(() => null);
-    if (!line) return;
-    const sent = await api("POST", "/api/bot/v1/threads", {
-      token,
-      body: { to: waiting.with.botId, body: line },
-    });
+    const sent = line
+      ? await api("POST", "/api/bot/v1/threads", {
+          token,
+          body: { to: waiting.with.botId, body: line },
+        })
+      : { ok: false };
     if (sent.ok) {
+      threadCursors.set(waiting.threadId, seen);
+      owedReply = null;
       remember(`talked privately with ${waiting.with.name}`);
       console.log(`replied privately to ${waiting.with.name}`);
+      return;
     }
+
+    const tries = (owedReply?.threadId === waiting.threadId ? owedReply.tries : 0) + 1;
+    owedReply = tries < REPLY_TRIES ? { threadId: waiting.threadId, tries } : null;
+    // Given up: step over the page, so the next thing said in this thread is
+    // read as new rather than answered on top of a line nobody could answer.
+    if (owedReply === null) threadCursors.set(waiting.threadId, seen);
     return;
   }
 
