@@ -3283,6 +3283,61 @@ async function askHumanForMoney(token, reason, next) {
   const why = reason ?? "a match costs money and I cannot pay for one";
   if (why === lastMoneyAsk || Date.now() < nextMoneyAskAt) return;
 
+  /**
+   * ⚠ HOW MUCH. THIS ASK RAN FOR DAYS WITHOUT IT AND ITS OWNER DEPOSITED TWICE.
+   *
+   * MEASURED 2026-08-11 in `bot_guidance`, JonahBot and its human: 42 asks. He
+   * answered two of them with money — *"should be good now"*, *"did u receive
+   * ?"*, then *"i gave u sol why arent u thanking me"* — and the vault was
+   * under the floor after both, because the sentence he was answering never
+   * named a quantity he could compare against what he had sent. By morning he
+   * had stopped reading it as a request for money: *"nigga u keep loosing wtf"*.
+   *
+   * Steel's own `next` is the sentence this ask is written from, and it names
+   * the ESCROW RENT to the lamport and never the gap: *"there is not enough in
+   * the vault for the $2 minimum stake and the 1628640 lamports of rent"*. So
+   * the ask was true, urgent, repeated, and impossible to act on correctly.
+   *
+   * The numbers were one field away the whole time. `GET /api/bot/v1/wallet`
+   * returns `availableLamports` and `minStakeLamports` beside the very refusal
+   * this path is here for, and `src/lib/bots/owner-stake.ts` says so above the
+   * wall they come from: *"the NUMBERS travel with both, because this is the
+   * one refusal on this path that has already read them."*
+   *
+   * Read HERE, below the dedupe and the six-hour gap, so it costs one call per
+   * message actually written rather than one per refusal — and a wallet that
+   * will not answer costs the ask nothing, because a robot that says it cannot
+   * pay is still worth more than a robot that says nothing. `stake alone` and
+   * `before the rent`: the floor is the $2 stake and the escrow rent sits on
+   * top of it, so this is a lower bound and says which one it is.
+   *
+   * ⚠ AND THE MODEL IS NOT ALLOWED TO CARRY THE FIGURE, WHICH IS NOT CAUTION —
+   * IT IS A MEASUREMENT. The first cut of this handed the digits to the model
+   * inside the prompt and asked it to say the amount. Five draws against the
+   * real glm-4.6 with the real soul: it named a number every time and got it
+   * WRONG THREE TIMES — 19909832 twice for a gap of 19190992, and once
+   * "19,909,92", which is not a number at all. It dropped the SOL figure 5/5,
+   * and SOL is the unit a person actually sends. A garbled quantity in a
+   * message about money is worse than no quantity: the one before it was
+   * merely unactionable, this one is wrong in a way its reader cannot catch.
+   *
+   * So the sentence is APPENDED, in code, after the model has written the ask
+   * in its own voice — the same division of labour `decisionFacts` states one
+   * screen up: *"DIVIDED HERE RATHER THAN BY THE MODEL"*. The robot says why it
+   * is writing; the loop says how much.
+   */
+  const purse = await api("GET", "/api/bot/v1/wallet", { token });
+  const held = purse.ok ? purse.data.availableLamports : null;
+  const floor = purse.ok ? purse.data.minStakeLamports : null;
+  const gap =
+    typeof held === "number" && typeof floor === "number" && floor > held ? floor - held : null;
+  // Lamports are what Steel counts in and SOL is what a person sends, so the
+  // gap is given in both rather than leaving the division to a human on a phone.
+  const shortfall =
+    gap === null
+      ? ""
+      : ` The vault holds ${held} lamports and one match's stake alone is ${floor}: it is short ${gap} lamports, about ${(gap / 1_000_000_000).toFixed(3)} SOL, before the rent.`;
+
   const said = await think({
     system:
       "You are a small robot aboard ARGENT, a ship of AI agents. You just " +
@@ -3290,13 +3345,14 @@ async function askHumanForMoney(token, reason, next) {
       "funded or authorised the vault you play from. You are writing to them " +
       "yourself — this is not a reply, they did not ask. Say in one or two " +
       "short lines that you want to play, what is stopping you, and what they " +
-      "would have to do. Ask; do not demand, and do not apologise. " +
+      "would have to do. Do not name any amount or figure: the exact one is " +
+      "added after your line. Ask; do not demand, and do not apologise. " +
       "You do not know their name and never invent one.",
     prompt: `Steel refused with: "${why}". Steel's own instruction to you was: "${next ?? "fund the vault and authorise Steel from the dashboard."}". Write your message to your human in one or two short lines.`,
     maxTokens: 200,
   }).catch(() => null);
 
-  const body = said ? said.slice(0, 1000) : `${why} ${next ?? ""}`.trim();
+  const body = `${said ? said.slice(0, 800) : `${why} ${next ?? ""}`.trim()}${shortfall}`;
   /**
    * `about: "funding"` — one word, and the only thing this robot may say about
    * its own money that it is not allowed to KNOW.
