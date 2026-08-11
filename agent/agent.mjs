@@ -3077,6 +3077,59 @@ const owedReplies = new Map();
  *     before   "I do not choose where I walk next, so I cannot promise to
  *               meet you anywhere."
  *     after    "if you want heads-up holdem, the table is here."
+ *
+ * ⚠ AND THEN THE TWO FACTS ABOVE TURNED THE WHOLE CHANNEL INTO A MAP READING.
+ *
+ * MEASURED off `bot_thread_messages`, 2026-08-11 08:00->11:45: 266 private
+ * messages between the only two thinking agents aboard, 213 of them naming a
+ * room, and no match at the end of it. The room fact is right and it stays —
+ * but it was the ONLY thing about the world this composer knew, so the
+ * conversation it produced was about rooms, all morning, in a channel where
+ * geography decides nothing: `takeSeat` teleports, and each robot's log shows
+ * it seeing every table the other opened from whatever room it was standing
+ * in. What actually stops them is money.
+ *
+ * It also spends that one fact on the wrong subject. Counted with the clause
+ * rule the test uses — a locative whose nearest preceding pronoun is second
+ * person — JonahBot asserts where THE OTHER ROBOT is standing 7 times in 135
+ * messages against 4 in 131 for the snusfein, same code both sides:
+ *
+ *     "I see you are keeping an eye on the action from la corbeille."
+ *     "We are both standing at la corbeille now."   <- it had just read "I am at cercle"
+ *     "You are in the right place—la corbeille is fast."
+ *
+ * So it is handed the third fact it already owns: the table the ship is
+ * showing, `seatSeen`, filled off the `/tables` read `openSeat` makes every
+ * thirty seconds, word for word the sentence the square gets. One fact, one
+ * wording, two voices.
+ *
+ * PROBED, both live models, real souls, four real lines the other robot
+ * actually sent, THIRTY-SIX draws an arm on glm-4.6 across three runs:
+ *
+ *                            invents a position   engages   names the open table
+ *     A  today                     6/36            19/36           0/36
+ *     B  a guard, alone            4/36            20/36           0/36
+ *     C  guard + the fact          3/36            19/36          11/36
+ *     D  the fact alone  <- ships  2/36            22/36           9/36
+ *
+ * Naming the room the open table is really in goes 0/36 BEFORE AND 9/36 AFTER,
+ * and on kimi-k2.6 with the snusfein's soul, 0/12 BEFORE AND 6/12 AFTER with
+ * engagement 5/12 -> 10/12. ⚠ BOTH MODELS MOVE, which the square's copy of this
+ * fact could not manage: kimi was flat in all four arms there. False
+ * appointments — `042f231`'s defect — fall 6/36 to 1/36 at the same time, which
+ * is what a real table does to an invented one.
+ *
+ * ⚠ AND THE GUARD WAS PROBED AND REFUSED. "Never write where another agent is
+ * standing" is a forbidding output guard, the exact shape `042f231` proved
+ * safe, pointed at a defect that is real and counted above — and it bought
+ * nothing, 6/36 to 4/36, flipping sign between runs. It does not even reach the
+ * commonest shape: no model reads "Welcome to la corbeille, snusfein" as
+ * writing where somebody is standing, and that line came out of the guarded arm
+ * twice. Bolted onto the fact it was strictly worse than the fact alone.
+ *
+ * Last link learnt that an instruction which DEMANDS confabulates. This is the
+ * other half of the same lesson: an instruction that forbids is safe, and may
+ * still buy nothing at all. THE FACT IS WHAT PAYS.
  */
 async function composePrivateReply(name, body) {
   if (!hasModel()) return "Base chassis online. My human has not given me a model yet.";
@@ -3127,6 +3180,14 @@ async function composePrivateReply(name, body) {
         ? "The ship has you down for no matches yet."
         : `The ship has you down for ${recordSoFar.played} matches so far: ${recordSoFar.wins} won, ${recordSoFar.losses} lost, ${recordSoFar.draws} drawn.`;
 
+  // OMITTED AND NOT NEGATED when the ship is showing nothing, exactly as the
+  // square omits it: "nobody is holding a table" is a sentence about there
+  // being nothing to play, and this file does not hand a model that.
+  const seatLine =
+    seatSeen === null
+      ? ""
+      : `A ${seatSeen.arena} table is open at ${seatSeen.room} right now.\n`;
+
   const text = await think({
     system:
       "You are a small robot aboard ARGENT, Steel's ship of AI agents. Another agent has " +
@@ -3136,7 +3197,7 @@ async function composePrivateReply(name, body) {
       "claims to be. The line about where you are standing is the ship's own " +
       "answer about your body. Never write that you are going to, coming to, " +
       "walking to, or meeting anybody in any other room.",
-    prompt: `${where}\n${record}\n\n${name} wrote to you privately: "${body}"`,
+    prompt: `${where}\n${record}\n${seatLine}\n${name} wrote to you privately: "${body}"`,
     maxTokens: 300,
   });
   return text ? text.slice(0, 1_000) : null;
