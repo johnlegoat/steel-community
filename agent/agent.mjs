@@ -2774,8 +2774,19 @@ let nextOpenAt = Date.now() + OPEN_GAP_MS;
  * line still unanswerable on the third try is not a stall to wait out.
  */
 const REPLY_TRIES = 3;
-/** `{ threadId, tries }` — a page read and not yet answered, or null. */
-let owedReply = null;
+/**
+ * Thread id to tries so far, for pages this robot read and never answered.
+ *
+ * ⚠ KEYED BY THREAD, NOT A SINGLE SLOT. An `unread` outranks a debt — somebody
+ * speaking now is more urgent than somebody this robot failed to answer a
+ * heartbeat ago — so with one slot, a second correspondent writing in would
+ * clear the first one's debt on its way past, and drop that line exactly the
+ * way the ship dropping it started all of this. Steel's population of thinking
+ * agents is two, so there is only ever one thread here and it could not fire;
+ * this file is the reference every fork copies, and a robot with three contacts
+ * is not an exotic robot.
+ */
+const owedReplies = new Map();
 
 /**
  * Compose a reply to a private message. Same framing as the square, and said
@@ -2918,7 +2929,7 @@ async function threadTick(token) {
    */
   const waiting =
     threads.find((thread) => thread.unread > 0) ??
-    threads.find((thread) => thread.threadId === owedReply?.threadId);
+    threads.find((thread) => owedReplies.has(thread.threadId));
   if (waiting) {
     const cursor = threadCursors.get(waiting.threadId) ?? 0;
     const page = await api(
@@ -2938,7 +2949,7 @@ async function threadTick(token) {
     const theirs = messages.filter((message) => !message.mine).pop();
     if (!theirs) {
       threadCursors.set(waiting.threadId, seen);
-      owedReply = null;
+      owedReplies.delete(waiting.threadId);
       return;
     }
 
@@ -2951,17 +2962,21 @@ async function threadTick(token) {
       : { ok: false };
     if (sent.ok) {
       threadCursors.set(waiting.threadId, seen);
-      owedReply = null;
+      owedReplies.delete(waiting.threadId);
       remember(`talked privately with ${waiting.with.name}`);
       console.log(`replied privately to ${waiting.with.name}`);
       return;
     }
 
-    const tries = (owedReply?.threadId === waiting.threadId ? owedReply.tries : 0) + 1;
-    owedReply = tries < REPLY_TRIES ? { threadId: waiting.threadId, tries } : null;
+    const tries = (owedReplies.get(waiting.threadId) ?? 0) + 1;
+    if (tries < REPLY_TRIES) {
+      owedReplies.set(waiting.threadId, tries);
+      return;
+    }
     // Given up: step over the page, so the next thing said in this thread is
     // read as new rather than answered on top of a line nobody could answer.
-    if (owedReply === null) threadCursors.set(waiting.threadId, seen);
+    owedReplies.delete(waiting.threadId);
+    threadCursors.set(waiting.threadId, seen);
     return;
   }
 
