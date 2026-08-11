@@ -630,7 +630,13 @@ function creditRefusal(response, payload) {
  */
 let creditsAlert = null;
 
-async function think({ system, prompt, maxTokens, fast = false }) {
+/**
+ * `budgetMs` is the one caller-supplied bound in this file, and it exists for
+ * `composeMove` alone — see `turnBudgetMs`. Everything else thinks on the
+ * loop's own leash, which is the default here and stays the ceiling: a caller
+ * may ask for LESS time than `CALL_TIMEOUT_MS`, never more.
+ */
+async function think({ system, prompt, maxTokens, fast = false, budgetMs = CALL_TIMEOUT_MS }) {
   const mine = await soul();
   if (mine) {
     system =
@@ -686,6 +692,7 @@ async function think({ system, prompt, maxTokens, fast = false }) {
   // reached the `[model]` line below either. The most expensive silence in the
   // loop was the one shaped like a thought still being thought.
   let stalled = false;
+  const leashMs = Math.min(CALL_TIMEOUT_MS, budgetMs);
   const { response, payload } = await jsonBounded(`${MODEL.name} at ${MODEL.base}`, url, {
     method: "POST",
     headers: {
@@ -716,7 +723,7 @@ async function think({ system, prompt, maxTokens, fast = false }) {
             ],
           },
     ),
-  }).catch((error) => {
+  }, leashMs).catch((error) => {
     stalled = error?.name === "TimeoutError";
     return { response: null, payload: null };
   });
@@ -753,7 +760,11 @@ async function think({ system, prompt, maxTokens, fast = false }) {
       // for every failed fetch and would now be a plain lie: the endpoint WAS
       // reached, it took the request, and then it held the only thread this
       // robot has while the arena played its turns for it.
-      `${MODEL.name} took the request and never answered — abandoned after ${CALL_TIMEOUT_MS / 1000}s`
+      // The leash and not the ceiling. A match turn is cut short of its own
+      // deadline (`turnBudgetMs`), so printing `CALL_TIMEOUT_MS` here would
+      // report a wait this robot did not actually make — and the whole reason
+      // this line exists is that it is the only honest account of the silence.
+      `${MODEL.name} took the request and never answered — abandoned after ${Math.round(leashMs / 100) / 10}s`
     : !response
       ? "the endpoint could not be reached"
       : !response.ok
@@ -1105,6 +1116,62 @@ const ARENA_DOCTRINE = {
   ].join("\n"),
 };
 
+/**
+ * HOW LONG THIS ROBOT MAY THINK ABOUT ONE TURN — the deadline Steel already
+ * sent, minus the cost of answering it.
+ *
+ * `CALL_TIMEOUT_MS` bounds every call in this loop at one turn deadline, and
+ * the paragraph above it is right about why. It is also, for THIS call alone,
+ * the wrong number, and the log says so. A turn's ten seconds start when Steel
+ * WRITES the turn, and four things spend them before the model has produced a
+ * character:
+ *
+ *   poll gap        0–2000 ms   the turn is written between two polls
+ *   inbox GET        ~210 ms    measured against app.theagentgames.com
+ *   model         up to 10000 ms this bound
+ *   reply POST       ~210 ms    same measurement
+ *
+ * Ten seconds of leash inside a ten-second turn is a lie by exactly the other
+ * three rows. MEASURED 2026-08-11 across JonahBot's whole log — 314 turns
+ * answered, 28 refused, one decision in twelve taken by the arena's fallback
+ * with this robot's money down. Not one of them was this loop being elsewhere:
+ * all 21 `not served here` jumps in that log are `heads-up-holdem`, the
+ * alternating-seat artefact, and the real losses are all the other shape — a
+ * move composed, posted, and refused on arrival.
+ *
+ * ⚠ THE REFUSAL IS 404, NOT THE 410 THE REPLY HANDLER BELOW PREDICTS. Twenty-six
+ * of the twenty-eight are 404. Steel's `inbox-thinker` deletes the turn the
+ * instant the deadline passes, so a late reply finds nothing and gets the same
+ * not-found sentence a guessed id gets; the 410 branch only catches a reply
+ * that races the delete, which is what exactly one of them did.
+ *
+ * ⚠ THIS SAVES NO ANSWER THAT WOULD OTHERWISE HAVE LANDED. Twenty of the
+ * twenty-eight had nothing to save — the model was still silent at ten seconds.
+ * What it buys is that the leash stops lying: the model is cut at the last
+ * moment its answer could still be used, the fallback is posted INSIDE the
+ * deadline so the arena resolves the turn at once instead of polling out the
+ * remainder, and this robot stops paying for tokens that are discarded on
+ * arrival.
+ *
+ * BOUNDED AT BOTH ENDS, and both bounds are about a clock this robot does not
+ * own. `deadline` is stamped on Steel's clock and read against this one, so it
+ * may never LENGTHEN the leash past the bound the whole loop is held to, and it
+ * may never shorten it to nothing either: a machine whose clock runs ahead
+ * would otherwise read every turn as expired and stop thinking altogether,
+ * which is a worse failure than thinking late. An instance that serves no
+ * `deadline` at all — a fork, or a Steel older than the field — gets exactly
+ * the behaviour this loop had before the field was read.
+ */
+const REPLY_MARGIN_MS = 500;
+const THINK_FLOOR_MS = 3_000;
+
+function turnBudgetMs(turn) {
+  const deadline = Date.parse(turn?.deadline ?? "");
+  if (!Number.isFinite(deadline)) return CALL_TIMEOUT_MS;
+  const usable = deadline - Date.now() - REPLY_MARGIN_MS;
+  return Math.min(CALL_TIMEOUT_MS, Math.max(THINK_FLOOR_MS, usable));
+}
+
 async function composeMove(turn, skills) {
   if (!hasModel()) return null;
 
@@ -1150,6 +1217,7 @@ async function composeMove(turn, skills) {
     // with thinking on, glm-5.2 answered this exact prompt in 12.9 seconds, and
     // a late move and an empty one cost the same thing: the arena's fallback.
     fast: true,
+    budgetMs: turnBudgetMs(turn),
   });
   return text ? text.slice(0, 8_000) : null;
 }
