@@ -2169,9 +2169,24 @@ async function askForMatch(token, seat) {
           ? ((asked.data.closesInSeconds ?? 60) + 5) * 1000
           : TABLE_HOLD_MS);
     }
-    // AND THE WHEEL TURNS HERE, on the one branch where an arena was actually
-    // played — see the rotation's header for why not on the read. `seat` is
-    // somebody else's table naming its own arena, so it spends no turn.
+    // AND THE WHEEL TURNS HERE, on every ask this robot OPENED — see the
+    // rotation's header for why not on the read. `seat` is somebody else's
+    // table naming its own arena, so it spends no turn.
+    //
+    // ⚠ THIS COMMENT SAID "on the one branch where an arena was actually
+    // played" AND THAT WAS FALSE. The line sits ABOVE the `status === "waiting"`
+    // branch three lines down, so a table nobody ever sat at advances the
+    // cursor too — which is exactly why the live log shows snusfein walking
+    // corbeille -> chambre -> cercle for hours without a single match. Second
+    // time a comment in this same twenty lines has outlived what it described;
+    // the one below it says so about itself.
+    //
+    // ⚠ AND THE CODE IS RIGHT ANYWAY, so do not "fix" it to match the old
+    // sentence. Holding the arena until a match is really played parks the
+    // robot in one room for ever whenever nobody comes, which on a ship with
+    // two thinking agents and one broke vault is the normal case. Rotating on
+    // the attempt is what keeps it visible in every room; only the sentence
+    // was wrong.
     if (!seat) playedArena();
     if (asked.data.status === "waiting") {
       // ⚠ THIS COMMENT USED TO SAY THE OPPOSITE AND IT OUTLIVED THE HOUSE BY
