@@ -2433,7 +2433,7 @@ function decisionFacts(money, history, seat, now) {
  * read as NO OPINION rather than as a no. See `wantsToPlay` for what a null
  * costs, which is deliberately today's behaviour and not a stop.
  */
-function readDecision(text) {
+function readDecision(text, floorLamports) {
   if (!text) return null;
   let answer = null;
   try {
@@ -2447,7 +2447,32 @@ function readDecision(text) {
   // reads as NO STAKE NAMED and the table opens at the floor, never as a
   // guess at what the model meant. The route re-checks the floor and the caps
   // anyway; this parse only decides what we claim the model said.
-  const stake = Number.isInteger(answer.stake) && answer.stake > 0 ? answer.stake : null;
+  let stake = Number.isInteger(answer.stake) && answer.stake > 0 ? answer.stake : null;
+  /**
+   * ⚠ AND A STAKE SITTING ON THE FLOOR IS THE SAME KIND OF NON-PRICE, WHICH
+   * COST THIS ROBOT REAL MATCHES BEFORE ANYONE LOOKED.
+   *
+   * MEASURED 2026-08-11 against the live model, six draws with the real facts
+   * and the real soul: it named the floor TO THE LAMPORT six times out of six.
+   * That is not a policy the parse should preserve, because the number it is
+   * copying back has an expiry date. The floor is `ceil((2 / priceUsd) * 1e9)`
+   * off a SOL price Steel caches for 60s: the loop reads it in `GET /wallet`,
+   * spends seconds thinking, and only then posts. When that cache turns over
+   * mid-thought and SOL has ticked down, the floor rises under a bet already
+   * sitting exactly on it and `POST /play` answers 422 — no table, no match,
+   * ten minutes until the next ask. Seen on 2 of the snusfein's 25 asks.
+   *
+   * The refusal Steel sends names its own remedy: *"or send no `stake` at all
+   * and the table opens at the floor."* Sending nothing is the ONLY way to
+   * mean "the floor" without racing it, because then the floor is computed at
+   * the instant it is charged rather than quoted seconds earlier. So a bet at
+   * or under it reads as no stake named — which is what the model meant.
+   *
+   * Never clamped UPWARD, here or anywhere: a price the model chose above the
+   * floor is its own, and a loop that raises a bet nobody authorised has begun
+   * playing its human's money on its own account.
+   */
+  if (stake !== null && Number.isFinite(floorLamports) && stake <= floorLamports) stake = null;
   return { play: answer.play, because: String(answer.because ?? "no reason given").slice(0, 200), stake };
 }
 
@@ -2503,7 +2528,11 @@ async function wantsToPlay(token, seat) {
      */
   }).catch(() => null);
 
-  const decision = readDecision(text);
+  // The floor travels into the parse because only the parse can tell a PRICE
+  // from an INTENTION — see `readDecision`. `money` is the same wallet answer
+  // the facts above were built from, so the number checked against is exactly
+  // the number the model was shown.
+  const decision = readDecision(text, money.minStakeLamports);
   // The channel is written on EVERY path out of here, never left over from the
   // last cycle: a stake named for a table that was declined must not price the
   // next one silently.
