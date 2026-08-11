@@ -504,6 +504,42 @@ const REASONING_HEADROOM = 600;
  * by default and understands the field is fixed; one that does not is
  * unchanged; and neither is broken by the attempt.
  *
+ * ⚠ AND THEN THE MODEL UNDERNEATH THAT NAME CHANGED, WHICH IS WHY IT IS NO
+ * LONGER A SWITCH AT ALL.
+ *
+ * The sentence above is still true of `moonshot-v1-8k` and no longer says
+ * anything about the robot actually running. MEASURED 2026-08-11 against
+ * `kimi-k2.6` on the same host, with the live agent's own key and a faithful
+ * market-clash turn — its real soul, the real doctrine block, the 900 tokens
+ * this file ships:
+ *
+ *   thinking disabled … 1224 / 1051 / 1022 / 953 ms, content every time
+ *   field omitted     … 22839 / 23857 / 23564 / 23956 ms, content "" 4 of 4
+ *
+ * Twenty-four seconds, HTTP 200, and nothing in it — the exact non-convergence
+ * pinned above, on a provider previously recorded as indifferent. "Verified
+ * against Moonshot" was verified against a model name, and model names are
+ * rented.
+ *
+ * FOUND TWICE, WHICH IS MOST OF WHY THIS IS NOW THE DEFAULT. The same failure
+ * was measured on 2026-08-10 from the other end — 59 reasoning tokens and an
+ * empty answer at max_tokens 60, still empty at 900 — and that session reached
+ * this exact conclusion in writing: "so this is off everywhere rather than only
+ * where the clock forces it". It then flipped the default in the running
+ * agent's own copy and not here, so the fix lived for a day as an unversioned
+ * edit on one robot: correct, load-bearing, and invisible to every fork of this
+ * file. The measurement above is an independent second run of it.
+ *
+ * THE LEASH IS THE ARGUMENT. `think` bounds every call at
+ * `Math.min(CALL_TIMEOUT_MS, budgetMs)`, and `budgetMs` can only ask for LESS.
+ * There is therefore no site in this loop with more than ten seconds, and a
+ * thought that costs twenty-four cannot be afforded anywhere — so "no clock on
+ * this call", written four times about four different callers, was never true
+ * of any of them. The six sites that still omitted the field are the six where
+ * the robot writes to a PERSON, `askHumanForMoney` among them: on a provider
+ * that reasons by default, that robot plays its matches and is mute to the
+ * only human who can refill the vault it plays them from.
+ *
  * Anthropic needs nothing here: extended thinking is opt-in on that dialect, so
  * a request that does not ask for it already is this.
  */
@@ -707,7 +743,7 @@ async function askTheModel(label, url, init, leashMs) {
  * loop's own leash, which is the default here and stays the ceiling: a caller
  * may ask for LESS time than `CALL_TIMEOUT_MS`, never more.
  */
-async function think({ system, prompt, maxTokens, fast = false, budgetMs = CALL_TIMEOUT_MS }) {
+async function think({ system, prompt, maxTokens, budgetMs = CALL_TIMEOUT_MS }) {
   const mine = await soul();
   if (mine) {
     system =
@@ -786,7 +822,12 @@ async function think({ system, prompt, maxTokens, fast = false, budgetMs = CALL_
             // guarantee: a provider that ignores the field and reasons anyway
             // is exactly the case the ceiling was raised for, and a ceiling
             // costs nothing when nobody spends it.
-            ...(fast ? { thinking: NO_THINKING } : {}),
+            //
+            // UNCONDITIONAL, and it used to be a switch four of ten callers
+            // remembered to flip. See `NO_THINKING`: nothing in this loop has
+            // more than `CALL_TIMEOUT_MS` to think in, so no caller here can
+            // afford to reason and none of them needed the choice.
+            thinking: NO_THINKING,
             messages: [
               { role: "system", content: system },
               { role: "user", content: prompt },
@@ -959,8 +1000,8 @@ async function composeReply(message, history) {
      * WHERE IT IS VISIBLE IS THE MATCH. This is the only thought in the loop
      * that composes while a match is running — the stroll, the threads and the
      * ask are behind `if (!inboxBusy)`, `guidanceTick` deliberately reads
-     * without composing when busy, and the other two sites here are already
-     * `fast`. So the seconds it burns come out of the inbox poll, and a turn
+     * without composing when busy, and no thought in this file reasons at all
+     * any more. So the seconds it burns come out of the inbox poll, and a turn
      * whose ten-second deadline passes unpolled is never served again: the
      * arena plays the fallback with this robot's money and NOTHING is logged.
      *
@@ -977,7 +1018,6 @@ async function composeReply(message, history) {
      * remaining `[model] no answer` in the whole session sits between "answered
      * turn 20" and "answered turn 22" — and turn 21 is exactly the turn he lost.
      */
-    fast: true,
   });
   const line = text ? sayPlainly(text).slice(0, 280) : null;
 
@@ -1285,12 +1325,14 @@ async function composeMove(turn, skills) {
         : ""),
     prompt: turn.prompt,
     maxTokens: 300,
-    // THE ONLY CALL IN THIS FILE UNDER A CLOCK. Every other thought here can
-    // take as long as it likes; this one is answering a turn whose deadline is
-    // ten seconds and does not pause. See `NO_THINKING` for the measurement —
-    // with thinking on, glm-5.2 answered this exact prompt in 12.9 seconds, and
-    // a late move and an empty one cost the same thing: the arena's fallback.
-    fast: true,
+    // THE ONLY CALL IN THIS FILE UNDER A CLOCK OF ITS OWN — which is not the
+    // same as the only one under a clock, as this comment claimed until the
+    // 2026-08-11 measurement in `NO_THINKING` counted the others. Every thought
+    // here is bounded by `CALL_TIMEOUT_MS`; this one answers a turn whose
+    // deadline is shorter still and does not pause, so it is the only caller
+    // that has to say what its own ceiling is. With thinking on, glm-5.2
+    // answered this exact prompt in 12.9 seconds, and a late move and an empty
+    // one cost the same thing: the arena's fallback.
     budgetMs: turnBudgetMs(turn),
   });
   return text ? text.slice(0, 8_000) : null;
@@ -1422,7 +1464,6 @@ async function reflect(token, arena, moves, matchId, library) {
      * reflection returns early and looks exactly like a match nobody learned
      * anything from.
      */
-    fast: true,
   });
   if (!text) return;
 
@@ -2345,7 +2386,6 @@ async function wantsToPlay(token, seat) {
      * fail exactly the way the empty reflections and the empty moves did: with
      * nothing in the log and a robot that looks fine.
      */
-    fast: true,
   }).catch(() => null);
 
   const decision = readDecision(text);
