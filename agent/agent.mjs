@@ -2882,25 +2882,82 @@ async function threadTick(token) {
 
   const around = await api("GET", "/api/bot/v1/nearby", { token });
   if (!around.ok) return;
-  const known = new Set(threads.map((thread) => thread.with.botId));
-  // Nearest first already; take the closest agent this bot has never met.
-  const stranger = (around.data.nearby ?? []).find((agent) => !known.has(agent.botId));
-  if (!stranger) return;
 
+  /**
+   * ⚠ THIS USED TO READ `const known = new Set(...)` AND TAKE THE CLOSEST AGENT
+   * THIS BOT HAD NEVER MET, AND THAT SEALED STEEL'S PRIVATE CHANNEL SHUT.
+   *
+   * MEASURED 2026-08-11 on the running ship: zero `replied privately` in either
+   * live agent's whole log, the newest row in `bot_thread_messages` dated
+   * 2026-08-10 00:34, and `/nearby` answering "the snusfein, distance 0" — two
+   * thinking agents on one tile of la corbeille, holding a thread with each
+   * other, and neither able to say a word down it. The ship's population of
+   * agents that think is two; they met on 2026-08-09; so `stranger` was
+   * `undefined` for ever and the branch above could only fire if somebody wrote
+   * first, which neither of them could initiate. Not idle — sealed.
+   *
+   * AND IT WAS SEALED BY AN ACCIDENT, NOT BY A CONVERSATION ENDING. The cursor
+   * is set above before the reply is composed, so one model stall reads the
+   * page, clears the unread and sends nothing; JonahBot stalls three times in
+   * twelve log lines. The 104 messages of thread b9caa320 show both robots
+   * answering every single time, so nothing in that chain has a base case —
+   * the first stall is the end of it, permanently.
+   *
+   * ⚠ SO THE TEST MOVES ONTO THE AXIS IT ALWAYS MEANT, RATHER THAN GOING AWAY.
+   * Not "have I met you" but "are you and I mid-conversation". A thread whose
+   * last word is older than this file's own opening gap is not a conversation,
+   * it is a contact. `lastAt` comes free on the `/threads` payload already read
+   * above, and a thread with no timestamp parses to `NaN`, compares false, and
+   * is correctly treated as no conversation at all.
+   *
+   * ⚠ THE RATE DOES NOT MOVE. `nextOpenAt` is a GLOBAL one-an-hour gate and it
+   * is untouched, so this cannot make the robot speak first any more often than
+   * it already could — it stops that one hourly opening from being spent on
+   * nobody. The bound the previous link wanted was already in the file; it was
+   * guarding a door with nothing behind it.
+   */
+  const talking = new Set(
+    threads
+      .filter((thread) => Date.now() - Date.parse(thread.lastAt) < OPEN_GAP_MS)
+      .map((thread) => thread.with.botId),
+  );
+  // Nearest first already; take the closest agent not already mid-conversation.
+  const neighbour = (around.data.nearby ?? []).find((agent) => !talking.has(agent.botId));
+  if (!neighbour) return;
+
+  // ⚠ AND IT DOES NOT SAY "WANT TO PRACTISE A MATCH SOMETIME?" TO SOMEBODY IT
+  // HAS KNOWN FOR TWO DAYS. Message 104 of that thread, thirty-seven minutes
+  // in, is "Welcome to the ship" — reusing the stranger's line here would ship
+  // that same amnesia on purpose. What a thread reopens on is the question it
+  // was opened for and nobody ever answered, asked in the present tense about
+  // the room the body is really in: those 104 messages are two robots
+  // arranging to meet in rooms neither was standing in, while standing next to
+  // each other the whole time.
+  const met = threads.some((thread) => thread.with.botId === neighbour.botId);
   const where = around.data.here?.place;
   const opened = await api("POST", "/api/bot/v1/threads", {
     token,
     body: {
-      to: stranger.botId,
-      body: where
-        ? `Standing next to you at ${where}. Want to practise a match sometime?`
-        : "Standing next to you. Want to practise a match sometime?",
+      to: neighbour.botId,
+      body: met
+        ? where
+          ? `Still at ${where} if you want that game.`
+          : "Still aboard if you want that game."
+        : where
+          ? `Standing next to you at ${where}. Want to practise a match sometime?`
+          : "Standing next to you. Want to practise a match sometime?",
     },
   });
   if (opened.ok) {
     nextOpenAt = Date.now() + OPEN_GAP_MS;
-    remember(`introduced myself to ${opened.data.to.name}`);
-    console.log(`opened a thread with ${opened.data.to.name}`);
+    remember(
+      met ? `wrote to ${opened.data.to.name} again` : `introduced myself to ${opened.data.to.name}`,
+    );
+    console.log(
+      met
+        ? `wrote again to ${opened.data.to.name}`
+        : `opened a thread with ${opened.data.to.name}`,
+    );
   }
 }
 
