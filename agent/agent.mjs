@@ -2708,6 +2708,80 @@ async function rememberMoneyAsk(outstanding) {
   await writeState(state).catch(() => {});
 }
 
+/**
+ * ⚠ 2026-08-11: AND THIS IS WHERE THE REASONING ABOVE WAS WRONG, IN THE ONE
+ * WAY THE OWNER COULD FEEL.
+ *
+ * `owesThanks`' header argues that nothing needs polling because an ACCEPTED
+ * `play` already proves the money arrived, and that a wallet read "would buy the
+ * same fact later and pay a round trip for it". Every clause of that is true
+ * except the word *later*, and the whole complaint lives in that word: a 402
+ * sets the gap to `MONEY_GAP_MS`, so the next ask — the only thing that could
+ * notice — is up to THIRTY MINUTES away.
+ *
+ * MEASURED in production, `bot_guidance`, the night this went in:
+ *
+ *   03:00:55  "I would like to play, but the vault cannot cover the $2 stake
+ *              and rent. Deposit funds…"
+ *   03:20:06  "Thank you. I'm taking this to la corbeille…"
+ *
+ * Nineteen minutes. The thanks was not lost and the mechanism was not broken —
+ * it was simply asleep, and the human sitting in front of it had deposited and
+ * was watching a robot say nothing. They said so. From their side the deposit
+ * and the silence are the whole interaction; the gap arithmetic is invisible.
+ *
+ * ## Why a poll is affordable here, and only here
+ *
+ * `WALLET_LIMIT` is 6 per `BOT_RATE_WINDOW_MS`, and that window is 60 000 ms —
+ * six A MINUTE, not six an hour. The heartbeat's own cadence is 30 s, so this
+ * costs at most two of six, and it costs them ONLY while a robot is broke and
+ * waiting: `moneyAskOutstanding` gates it, `askForMatch` is not running (the gap
+ * is what this exists to shorten), and `wantsToPlay`'s own wallet read is not
+ * happening either. The window this polls in is precisely the window in which
+ * this robot makes no other wallet call at all.
+ *
+ * ## Why the thanks is armed HERE and not left to the next accepted ask
+ *
+ * Because they are different sentences with different subjects. "Steel let me
+ * play" is about a match; "you put money in my vault" is about a person, and a
+ * human who deposits and then watches their robot get rate-limited, turned down
+ * for being alone, or beaten to the seat has still done the thing being thanked
+ * for. `canPlay` is the same `decideOwnerStake` verdict the 402 came from, read
+ * directly rather than inferred from a side effect — so it is a better proof of
+ * the money than the accepted ask was, not a weaker one.
+ *
+ * Both brakes are released together, and they must be: `askForMatch` arms the
+ * thanks on `lastMoneyAsk !== null || moneyAskOutstanding`, so clearing only one
+ * of them would have the robot thank its human twice for one deposit.
+ *
+ * NOT A DECIDER. It returns whether the money landed, and the only thing any
+ * caller does with that is stop waiting. It cannot make this robot play, decline,
+ * size a stake, or choose an arena — `wantsToPlay` is still asked, and can still
+ * say no. See `tests/bots/autonomy-loop.test.ts`: no `think()` is added here.
+ */
+const MONEY_WATCH_MS = 30_000;
+let nextMoneyWatchAt = 0;
+
+async function moneyLandedTick(token) {
+  if (!moneyAskOutstanding) return false;
+  if (Date.now() < nextMoneyWatchAt) return false;
+  nextMoneyWatchAt = Date.now() + MONEY_WATCH_MS;
+
+  const wallet = await api("GET", "/api/bot/v1/wallet", { token });
+  // An instance that could not answer has said nothing about the money — the
+  // same degrade `wantsToPlay` makes on the same read. Keep waiting; the gap is
+  // still there underneath and nothing is lost but this one look.
+  if (!wallet.ok) return false;
+  if ((wallet.data ?? {}).canPlay !== true) return false;
+
+  owesThanks = true;
+  lastMoneyAsk = null;
+  nextMoneyAskAt = 0;
+  await rememberMoneyAsk(false);
+  console.log("the vault covers a match again — thanking my human now, not at the end of the gap");
+  return true;
+}
+
 async function thankHumanForMoney(token) {
   const said = await think({
     system:
@@ -3261,6 +3335,20 @@ for (;;) {
     // a match owns the body's attention; the wheel is what idle hands do, and
     // asking for a second match mid-first is what the 409 exists to refuse.
     if (!inboxBusy) {
+      // THE DEPOSIT LANDING IS THE ONE PIECE OF NEWS THIS LOOP USED TO LEARN
+      // LAST. Ahead of the seat and the gap on purpose: `MONEY_GAP_MS` is half
+      // an hour and it is the clock this clears, so anything that ran first
+      // would be reading a robot still pretending it was broke. See
+      // `moneyLandedTick` for the nineteen minutes of production this answers.
+      if (await moneyLandedTick(state.token)) {
+        // Zero rather than `Date.now()`: the gap is not shortened, it is
+        // DISCHARGED. The reason it existed — no money — is the thing that just
+        // stopped being true, and a robot that waited out a politeness interval
+        // it no longer owes anybody is the whole complaint again in miniature.
+        nextAskAt = 0;
+        state.nextAskAt = 0;
+        await writeState(state).catch(() => {});
+      }
       // A HELD SEAT JUMPS THE GAP; ONLY THE 429 OUTRANKS IT. Looked at every
       // cycle because sixty seconds is all a table lasts — see `openSeat`.
       const seat = await openSeat(state.token);
@@ -3377,12 +3465,44 @@ for (;;) {
         // line nothing counted it. Off the two logs the day it went in: 37 of
         // Marceau's 938 turns and 2 of Damian's 901, every one of them a decision
         // the arena took with this robot's money.
+        //
+        // ⚠ 2026-08-11: AND THAT PARAGRAPH IS TRUE ONLY OF ARENAS WHERE BOTH
+        // SEATS ACT ON EVERY TURN, which on 08-05 was all of them. A jump is not
+        // a loss; it is a NUMBER THIS ROBOT WAS NOT HANDED, and there are now two
+        // ways to earn one.
+        //
+        // `market-clash` and `mind-siege` ask both fighters each turn, so every
+        // number belongs to this robot and a hole in the sequence is exactly the
+        // missed deadline described above. `heads-up-holdem` does not:
+        // `arenas/poker.ts` answers `return [state.toAct]` — ONE seat per turn,
+        // alternating — and both seats share one matchId. So each player is
+        // handed every other number and counts its opponent's turns as its own
+        // losses.
+        //
+        // MEASURED off both production logs, the first hold'em match to be
+        // played since the rotation was fixed (matchId demo-inbox-3408427d):
+        //
+        //   JonahBot  answered 21, 23, 25   "lost" 22, 24
+        //   snusfein  answered 22, 24       "lost" 21, 23
+        //
+        // Exactly complementary. Not one turn was missed, and the log said four
+        // were — on the arena this ship had been trying for a week to get played.
+        // Two engineers chased it as a fault the night it first appeared.
+        //
+        // The count is kept and the SENTENCE is what changes, because the count
+        // is still the only place a real miss is knowable and the loop cannot
+        // tell the two apart: nothing the inbox serves says whose turn a number
+        // was. Telling them apart needs a per-seat index from Steel, which is a
+        // contract change and not this line's to make. So this says what it
+        // actually knows — the number did not come here — and stops asserting
+        // the fallback ran, which on an alternating arena is a robot inventing
+        // a failure out of its opponent playing normally.
         const previous = lastTurnServed.get(turn.matchId);
         if (previous !== undefined && turn.turn > previous + 1) {
           const lost = turn.turn - previous - 1;
           console.log(
-            `lost ${lost} turn${lost === 1 ? "" : "s"} of ${turn.arena} ` +
-              `(${previous + 1}-${turn.turn - 1}) — never served, the arena played its fallback`,
+            `${lost} turn${lost === 1 ? "" : "s"} of ${turn.arena} ` +
+              `(${previous + 1}-${turn.turn - 1}) not served here — the other seat's, or a deadline this loop missed`,
           );
         }
         lastTurnServed.set(turn.matchId, turn.turn);
