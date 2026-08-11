@@ -134,10 +134,15 @@ async function jsonBounded(label, url, init, timeoutMs = CALL_TIMEOUT_MS) {
     return { response, payload };
   } catch (error) {
     if (error?.name === "TimeoutError") {
+      // ⚠ THIS USED TO END "that is a whole turn deadline, so the arena has
+      // already played this robot's fallback", and `askTheModel` made that a
+      // lie on the line it is printed most: a first draw is HALF a turn, and
+      // the second draw answers 86% of the time. Whether anything was lost is
+      // decided above this function now — `[model] no answer` is the line that
+      // knows, and it counts the draws. This one reports the socket and stops.
       console.warn(
         `[stall] ${label} took the request and said nothing for ` +
-          `${Math.round((Date.now() - startedAt) / 1000)}s — abandoned. That is a whole turn ` +
-          `deadline, so the arena has already played this robot's fallback.`,
+          `${Math.round((Date.now() - startedAt) / 1000)}s — abandoned.`,
       );
     }
     throw error;
@@ -631,6 +636,72 @@ function creditRefusal(response, payload) {
 let creditsAlert = null;
 
 /**
+ * THE SHORTEST DRAW STILL WORTH MAKING — the slowest healthy thought measured.
+ *
+ * MEASURED 2026-08-11 against the real endpoint, JonahBot's own key and model,
+ * on a faithful market-clash turn prompt: eight calls to
+ * `https://api.z.ai/api/anthropic/v1/messages`, glm-4.6, all eight answered,
+ * 1938 / 2127 / 2227 / 2368 / 2390 / 2564 / 2642 / 3624 ms. A thought costs two
+ * seconds and change. Cutting a draw below the slowest of those would be
+ * manufacturing the very silence this exists to survive, so a budget that
+ * cannot pay for two of them buys one and waits.
+ */
+const ATTEMPT_FLOOR_MS = 3_600;
+
+/**
+ * ⚠ ONE DRAW OF TEN SECONDS, WHERE THE ANSWER TAKES TWO.
+ *
+ * `jsonBounded` spends the entire leash on a single socket. When that socket is
+ * alive the call is over in 2.3 s and the rest of the budget is never touched;
+ * when it is dead the loop stares at it for the remaining eight seconds and
+ * then plays the arena's fallback with this robot's money on the table. The
+ * leash was never the problem — `ecf7725` already cut it to the turn's real
+ * deadline — the problem is that the whole of it is bet on one draw.
+ *
+ * AND A STALL IS A DEAD SOCKET, NOT A SICK PROVIDER. Measured off this robot's
+ * whole production log, 2483 lines, grouping the 40 model stalls by how many
+ * landed back to back:
+ *
+ *   bursts of 1 …  30      bursts of 2 …  5      bursts of 3+ …  0
+ *
+ * 86% of the silences end with the next call, and not one ever ran three deep.
+ * A second draw is therefore worth roughly what the first was worth, and the
+ * eight seconds of staring it replaces are worth nothing at all.
+ *
+ * The total wait does not move. A turn that could afford 8.6 s before affords
+ * 8.6 s now; it is spent as two draws rather than one, which is the only change
+ * here. `CALL_TIMEOUT_MS` is untouched and still the ceiling.
+ *
+ * ⚠ A REFUSAL IS NOT A SILENCE AND IS NEVER DRAWN AGAIN. A 402 out of credits,
+ * a 404 at the wrong URL, a 500 on a bad minute — those are answers, arriving
+ * on time. Asking twice would halve the number of thoughts this robot has left
+ * before its provider cuts it off, to be told the same thing twice. Only a
+ * socket that took the request and said nothing is worth a second draw.
+ *
+ * ⚠ AND THIS IS TRANSPORT. It never reaches a prompt, never sees an arena and
+ * never chooses a move — it asks this robot's own brain a second time and hands
+ * back whatever comes. `tests/bots/model-retry.test.ts` runs this block rather
+ * than reading it.
+ */
+async function askTheModel(label, url, init, leashMs) {
+  const draws = leashMs >= 2 * ATTEMPT_FLOOR_MS ? 2 : 1;
+  const perDraw = Math.floor(leashMs / draws);
+  let attempts = 0;
+  let stalled = false;
+  for (let draw = 0; draw < draws; draw += 1) {
+    attempts += 1;
+    const got = await jsonBounded(label, url, init, perDraw).catch((error) => {
+      stalled = error?.name === "TimeoutError";
+      return null;
+    });
+    // An ANSWER, of any kind — including a refusal, which the caller reads for
+    // itself. Only the throw above comes back round for another draw.
+    if (got) return { ...got, stalled: false, attempts };
+  }
+  return { response: null, payload: null, stalled, attempts };
+}
+
+/**
  * `budgetMs` is the one caller-supplied bound in this file, and it exists for
  * `composeMove` alone — see `turnBudgetMs`. Everything else thinks on the
  * loop's own leash, which is the default here and stays the ceiling: a caller
@@ -691,9 +762,8 @@ async function think({ system, prompt, maxTokens, fast = false, budgetMs = CALL_
   // accepted the POST and then held the socket never reached it, and never
   // reached the `[model]` line below either. The most expensive silence in the
   // loop was the one shaped like a thought still being thought.
-  let stalled = false;
   const leashMs = Math.min(CALL_TIMEOUT_MS, budgetMs);
-  const { response, payload } = await jsonBounded(`${MODEL.name} at ${MODEL.base}`, url, {
+  const { response, payload, stalled, attempts } = await askTheModel(`${MODEL.name} at ${MODEL.base}`, url, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -723,10 +793,7 @@ async function think({ system, prompt, maxTokens, fast = false, budgetMs = CALL_
             ],
           },
     ),
-  }, leashMs).catch((error) => {
-    stalled = error?.name === "TimeoutError";
-    return { response: null, payload: null };
-  });
+  }, leashMs);
 
   const text = anthropic ? payload?.content?.[0]?.text : payload?.choices?.[0]?.message?.content;
   if (typeof text === "string" && text.trim()) return text.trim();
@@ -764,7 +831,14 @@ async function think({ system, prompt, maxTokens, fast = false, budgetMs = CALL_
       // deadline (`turnBudgetMs`), so printing `CALL_TIMEOUT_MS` here would
       // report a wait this robot did not actually make — and the whole reason
       // this line exists is that it is the only honest account of the silence.
-      `${MODEL.name} took the request and never answered — abandoned after ${Math.round(leashMs / 100) / 10}s`
+      //
+      // AND IT NAMES THE DRAWS, because "abandoned after 8.6s" now describes
+      // two dead sockets rather than one long one, and 86% of the time the
+      // second draw is the one that answers — so a silence that survived both
+      // is a different and much rarer animal than the one this line used to
+      // report. See `askTheModel`.
+      `${MODEL.name} took the request and never answered — abandoned after ` +
+        `${Math.round(leashMs / 100) / 10}s across ${attempts} ${attempts === 1 ? "try" : "tries"}`
     : !response
       ? "the endpoint could not be reached"
       : !response.ok
