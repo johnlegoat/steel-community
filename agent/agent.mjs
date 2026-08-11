@@ -997,6 +997,11 @@ function sameLine(a, b) {
  *
  *   0/12 IN ALL FOUR ARMS ON BOTH MODELS, AND 0/36 FOR THE CONTROL ALONE
  *
+ * Taken to thirty-six draws an arm on glm-4.6 the tie breaks the wrong way for
+ * every change: today 0/36 and the demand dropped 0/36, but the whole sentence
+ * dropped 1/36 and the ban 1/36. The two edits that touch more than they must
+ * are the only two that invented anything at all.
+ *
  * Nothing to reduce, so nothing to attribute, and the ban is refused for the
  * second session running on the same evidence a ban is not worth its shape.
  * A single composition simply does not do this: the window has to be fed its
