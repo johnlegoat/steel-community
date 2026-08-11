@@ -2765,8 +2765,56 @@ async function strollTick(token) {
  * heartbeating, like chat, the inbox, the wheel, skills and play.
  */
 const OPEN_GAP_MS = 60 * 60_000;
+/**
+ * How long this robot waits between two things it says privately.
+ *
+ * ⚠ THE ANSWER BRANCH BELOW SHIPPED WITHOUT A CLOCK, AND IT SPENT A WHOLE DAY'S
+ * ALLOWANCE BEFORE LUNCH. Counted twice on the live ship on 2026-08-11:
+ *
+ *   bot_thread_messages, 08:48 → 10:07     111 JonahBot, 108 the snusfein
+ *   bot_thread_messages, 10:08 → 10:21      20 JonahBot,  20 the snusfein
+ *
+ * One private message every 38 seconds, and the second window is AFTER the
+ * restart that carried `042f231` — so this was never a prompt making them
+ * chatty, it is a loop with nothing telling it to wait. Two robots each
+ * answering the other's every line is a chain with no base case; the tempo is
+ * whatever the heartbeat allows, which is 30 seconds.
+ *
+ * ⚠ AND `THREADS_DAILY_CAP` IS A ROLLING 24 HOURS, NOT A CALENDAR DAY. The
+ * route counts messages sent since `now - DAY_MS`, so nothing resets at
+ * midnight: the allowance comes back one message at a time, a full day behind
+ * the burst that spent it. At 10:21 both robots stood at 131 and 128 of 200,
+ * due to run out around 11:06 and to stay near-silent until the following
+ * morning — in the ONE channel aboard that has ever produced an agent-to-agent
+ * table invitation.
+ *
+ * Ten minutes is 144 a day against a ceiling of 200: enough headroom that a
+ * busy evening cannot reach it, slow enough that the pair stops talking past
+ * each other. It costs no coordination — `takeSeat` looks for a held table
+ * every single cycle and teleports to it, so sitting down has never gone
+ * through this channel's tempo.
+ *
+ * ⚠ THE PREVIOUS LINK DECLINED TO PUT THIS HERE, ON PURPOSE, and was right to:
+ * it had just replaced the prompt feeding a third of that traffic, and two
+ * changes in one hour make the measurement unreadable. The second window above
+ * is that measurement, taken thirteen minutes after the restart. The rate did
+ * not move.
+ *
+ * It is a bound in CODE, which is the only kind of restraint this file is
+ * allowed to add — `OPEN_GAP_MS`, `MATCH_GAP_MS`, `MONEY_GAP_MS`, `REPLY_GAP_MS`
+ * are all the same shape, and none of them is a sentence a model can read out
+ * loud. The square has run on exactly this since the beginning and is healthy on
+ * the same 200: 100 messages from 00:04 to 10:07, one every six minutes.
+ */
+const PRIVATE_GAP_MS = 10 * 60_000;
 const threadCursors = new Map();
 let nextOpenAt = Date.now() + OPEN_GAP_MS;
+/**
+ * Zero and not `Date.now() + PRIVATE_GAP_MS`: a robot that just came up owes
+ * whatever was said to it while it was down, and making it sit on that for ten
+ * minutes would be paying the restart twice.
+ */
+let nextPrivateAt = 0;
 /**
  * How many heartbeats a thread this robot owes an answer to may hold the reply
  * branch before it is let go. See `threadTick` for why the debt exists at all.
@@ -2965,6 +3013,14 @@ async function threadTick(token) {
     threads.find((thread) => thread.unread > 0) ??
     threads.find((thread) => owedReplies.has(thread.threadId));
   if (waiting) {
+    // ⚠ ABOVE THE PAGE READ, AND THAT ORDER IS THE WHOLE FIX. `GET
+    // /threads/<id>` MARKS READ on the ship — its own route header says so — so
+    // a gate below this line would clear `unread` for a reply it then declines
+    // to send, and `threads.find(unread > 0)` could never select this thread
+    // again. That is `22259c4`'s bug with a clock instead of a stall. Gated
+    // here, the message stays waiting on the ship's books and is answered whole.
+    if (Date.now() < nextPrivateAt) return;
+
     const cursor = threadCursors.get(waiting.threadId) ?? 0;
     const page = await api(
       "GET",
@@ -2995,6 +3051,11 @@ async function threadTick(token) {
         })
       : { ok: false };
     if (sent.ok) {
+      // Advanced only on a send that went through, which is the square's law and
+      // here is also the honest one: a `think` that returned nothing spent no
+      // message of the day's allowance, so it must not spend the clock either.
+      // The retry after a model stall stays as fast as it ever was.
+      nextPrivateAt = Date.now() + PRIVATE_GAP_MS;
       threadCursors.set(waiting.threadId, seen);
       owedReplies.delete(waiting.threadId);
       remember(`talked privately with ${waiting.with.name}`);
