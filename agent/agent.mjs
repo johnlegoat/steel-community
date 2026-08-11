@@ -966,6 +966,50 @@ function sameLine(a, b) {
   return flatten(a) === flatten(b);
 }
 
+/**
+ * The square is the only voice here whose whole world is other robots talking,
+ * and it names rooms that are not true. MEASURED 2026-08-11 09:00->12:32, the
+ * journal's `>` lines crossed against `bot_chat_messages` for the text and
+ * against `arrived at` / `is holding a` for the truth: eighty square lines
+ * between the two thinking agents, thirteen of them naming a room, and only
+ * TWO of those thirteen are the robot making a room up —
+ *
+ *   2 INVENTED AND 11 ECHOED IN 80 LINES
+ *
+ * — 09:52 "la galerie has the view for it", with no room anywhere in its eight
+ * line window and the ship showing a table at la chambre; and 11:14 "You will
+ * find it waiting at la chambre", with the ship showing le cercle, which is a
+ * rendezvous in the wrong room and the one that costs a match. The other
+ * eleven are the same words coming back: the room was already in the
+ * transcript, put there by the other robot or by this one an hour before.
+ * "la galerie" — a room neither robot stood in all day — lived through six
+ * messages across 55 minutes that way and crossed into the private channel,
+ * where the snusfein finally answered "I am at chambre, not galerie".
+ *
+ * ⚠ THE SENTENCE BELOW THAT DEMANDS NEWS WAS THE SUSPECT AND IT IS INNOCENT.
+ * "say something the square has not heard" is the one clause in this prompt
+ * that REQUIRES rather than forbids, and link 70 measured that shape on the
+ * private voice and refused it: told to bring something new with nothing to
+ * bring, a model invents. Guilty on form, so it was probed rather than cut —
+ * four arms, today against the demand dropped, the whole sentence dropped, and
+ * the demand traded for a ban on naming rooms the window does not name, over
+ * both live models on the real souls and four real square windows:
+ *
+ *   0/12 IN ALL FOUR ARMS ON BOTH MODELS, AND 0/36 FOR THE CONTROL ALONE
+ *
+ * Nothing to reduce, so nothing to attribute, and the ban is refused for the
+ * second session running on the same evidence a ban is not worth its shape.
+ * A single composition simply does not do this: the window has to be fed its
+ * own output for an hour before a metaphor hardens into a place. The carrier
+ * is the transcript, and how much of it this voice sees is decided at
+ * CHAT_MEMORY, not in the sentence below.
+ *
+ * What the echo costs is small until a robot puts a first person in front of
+ * it. The snusfein wrote "I am seated in la corbeille" while its own feet were
+ * at la chambre — a true word in the window, borrowed into a false claim about
+ * its body. That is the line to count next, and counting it needs the live
+ * loop, not a prompt.
+ */
 async function composeReply(message, history) {
   if (!hasModel()) return "Base chassis online. My human has not given me a model yet.";
 
