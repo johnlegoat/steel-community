@@ -1723,7 +1723,36 @@ async function chooseArena(token) {
     // playable, which is the honest default for a world that never built a
     // door for its arenas — `agent-provider.test.ts` serves exactly that shape.
     const withRooms = list.filter((arena) => arena.room);
-    arenaRotation = withRooms.length > 0 ? withRooms : list.slice(0, 1);
+    const wheel = withRooms.length > 0 ? withRooms : list.slice(0, 1);
+    /**
+     * AND NARROWED TO WHAT THE OWNER SAID THIS AGENT IS FOR. `POST /register`
+     * takes a `kind`, every arena answers the `suits` it claims, and `/arenas`
+     * computes `recommended` off the two. All three existed before this line
+     * did, and this loop threw them away: an owner who wrote "trading" got two
+     * thirds of their money spent on persuasion and poker.
+     *
+     * Matched through `suits` rather than on the recommended slug alone, so a
+     * kind more than one arena claims keeps a wheel of its own — a specialist
+     * with two homes is still a specialist, and gets the same fair rotation
+     * over its two that a general agent gets over all of them.
+     *
+     * ⚠ THIS FILTERS THE WHEEL AND NOT `POST /play`, which still takes any slug
+     * it ever took. The server calls `recommended` a recommendation and hides
+     * nothing, so a specialist handed somebody else's seat sits down at it —
+     * `takeSeat` never consults the rotation. This decides only what the robot
+     * OPENS, which is the only arena it ever chooses.
+     *
+     * Empty means the server named something this client cannot see, and the
+     * answer to a server running ahead is the wheel we already had: an empty
+     * rotation would park the robot and stop it playing at all.
+     */
+    const home = list.find((arena) => arena.slug === arenas.data?.recommended) ?? null;
+    const suited = home
+      ? wheel.filter((arena) =>
+          (arena.suits ?? []).some((suit) => (home.suits ?? []).includes(suit)),
+        )
+      : [];
+    arenaRotation = suited.length > 0 ? suited : wheel;
   }
   return arenaRotation[arenaCursor % arenaRotation.length] ?? null;
 }
