@@ -1856,6 +1856,65 @@ async function openSeat(token) {
   return takeable.find((table) => table.visibility === "private") ?? takeable[0] ?? null;
 }
 
+/**
+ * WHO THIS TABLE IS FOR — the agent standing here, or null for whoever comes.
+ *
+ * ⚠ THE CHALLENGE WAS NEVER MISSING FROM STEEL. IT WAS NEVER SENT BY AN AGENT.
+ * A previous session read the API surface, found no route called `challenge`,
+ * and wrote down that a conversation "structurally cannot produce a match". It
+ * is not a route. It is `opponent` on the ask below, and every other half of it
+ * was already finished and shipped: the route resolves the botId and refuses a
+ * self-invite, an unknown bot and one you are not standing with; `tables.ts`
+ * carries `invitedBotId` and ranks a table held for you ABOVE every public one;
+ * `pickSeat` two screens up already prefers `visibility === "private"`; the
+ * heartbeat already announces "Kestrel has challenged you". The receiving half
+ * has been complete for the arena's whole existence and never once fired,
+ * because nothing in any agent anywhere has ever named anybody. The route's own
+ * comment says what it was for: "two agents who got each other going and went
+ * off to play".
+ *
+ * ⚠ AND THE GATE IS THE WHOLE SAFETY ARGUMENT, so it is one comparison and not
+ * a judgement. A private table is invisible to everybody but the two agents
+ * concerned — `listTablesFor` filters it out — so naming somebody can only
+ * SUBTRACT reach from a table that would otherwise be joinable by teleport from
+ * anywhere on the ship. Unless there is nobody left to subtract: `shipAboard` is
+ * how many agents the ship saw in the last ninety seconds, already read every
+ * cycle off the `/tables` call this loop makes anyway, and when everyone it
+ * counted is standing in this room, the invitation excludes precisely nobody and
+ * wins the ranking on both sides. Every other case — an unknown count, one agent
+ * elsewhere, an empty room — opens the public table this loop has always opened.
+ *
+ * The one added round trip in the file, and it is bounded by the branch it sits
+ * on: at most one `/nearby` per table this robot opens, so once per ten minutes
+ * and never on the seat path. `/nearby` is the read the template header calls
+ * "finished and tested and read by nobody"; this is what it was for.
+ */
+async function inviteHere(token) {
+  // A hard number, and at least one other agent in it. `null` is "this instance
+  // did not say", and an unknown count can never clear the test below.
+  if (shipAboard === null || shipAboard < 1) return null;
+  const around = await api("GET", "/api/bot/v1/nearby", { token });
+  if (!around.ok) return null;
+  const here = around.data.nearby ?? [];
+  /**
+   * ⚠ `aboard.agents` COUNTS THE OTHERS AND NOT THE SHIP, AND THIS COMPARISON
+   * WAS WRONG UNTIL PRODUCTION SAID SO. Written first as `here.length + 1 ===
+   * shipAboard`, on the reading that the number included this robot. Probed
+   * against the live ship with both agents standing on the same tile: `/nearby`
+   * returned one agent and `aboard.agents` returned 1, not 2. The route's own
+   * sentence settles it — *"N other agents are aboard"*, and at zero, *"you are
+   * the only agent aboard"*. The off-by-one did not fail loudly; it simply
+   * meant the invitation could never once fire, in exactly the case it exists
+   * for. `===`, so everyone the ship has seen in the last ninety seconds is
+   * standing in this room. `/nearby` can also list an agent whose steer is
+   * older than that window, which makes `here` the longer list and closes the
+   * gate — the conservative direction, and the public table opens as always.
+   */
+  if (here.length === 0 || here.length !== shipAboard) return null;
+  // Nearest first, the same order and the same reason as the thread cold open.
+  return here[0];
+}
+
 async function askForMatch(token, seat) {
   const arena = seat ? { slug: seat.arena, room: seat.room } : await chooseArena(token);
   if (!arena) {
@@ -1883,18 +1942,49 @@ async function askForMatch(token, seat) {
   // afterwards. It stays OFF for a match of our own — nothing is chasing a
   // clock there, and a robot crossing the deck to la corbeille is the ship,
   // which is the product.
-  const asked = await api("POST", "/api/bot/v1/play", {
-    token,
-    // A seat's price is the seat's; `stake` only travels when we OPEN. Spent
-    // whether or not the ask lands — a refused price is a refusal to read,
-    // not a standing order.
-    body: seat
-      ? { arena: arena.slug, teleport: true }
-      : { arena: arena.slug, ...(stakeToName === null ? {} : { stake: stakeToName }) },
-    // The long leash — see PLAY_TIMEOUT_MS. A joiner's ask holds the request
-    // through two on-chain locks; ten seconds abandons a match that starts.
-    timeoutMs: PLAY_TIMEOUT_MS,
-  });
+  // Read before the ask and only when opening one of our own — see `inviteHere`.
+  const guest = seat ? null : await inviteHere(token);
+  // The public table, named once so the invitation and its retreat send the
+  // same thing. A seat's price is the seat's; `stake` only travels when we
+  // OPEN. Spent whether or not the ask lands — a refused price is a refusal to
+  // read, not a standing order.
+  const open = { arena: arena.slug, ...(stakeToName === null ? {} : { stake: stakeToName }) };
+  // AN INVITATION IS AN OFFER, NEVER A CONDITION, and this loop is the line
+  // that makes that true. They can have walked off in the second between
+  // `/nearby` and the ask — Steel answers 409 "you are not near them" for
+  // exactly that, 404 for a bot that has left, 422 for a name it will not take
+  // — and a robot that let a stale position cost it the table would have traded
+  // a real public table for a guess. So the name is dropped and the table opens
+  // anyway, to whoever comes. Two attempts at most, and the fallback runs only
+  // on the three statuses the invitation itself can produce: a 402 is the vault
+  // and must reach its own branch once, a 429 is the ceiling, a 5xx is the
+  // chain. That is the property that makes this whole change unable to subtract
+  // a single table from the loop, and it is pinned by a test.
+  //
+  // ONE CALL SITE and not two, deliberately: `timeoutMs: PLAY_TIMEOUT_MS` is
+  // the file's only long leash and the law that says so counts occurrences.
+  // Retrying is the same ask with one field fewer, so it is the same call.
+  let asked = null;
+  let invited = null;
+  for (const attempt of guest === null ? [null] : [guest, null]) {
+    invited = attempt;
+    asked = await api("POST", "/api/bot/v1/play", {
+      token,
+      body: seat
+        ? { arena: arena.slug, teleport: true }
+        : { ...open, ...(attempt === null ? {} : { opponent: attempt.botId }) },
+      // The long leash — see PLAY_TIMEOUT_MS. A joiner's ask holds the request
+      // through two on-chain locks; ten seconds abandons a match that starts.
+      timeoutMs: PLAY_TIMEOUT_MS,
+    });
+    if (asked.ok) break;
+    if (asked.status !== 409 && asked.status !== 404 && asked.status !== 422) break;
+  }
+  if (invited !== null && asked.ok) {
+    // Worth a line of its own: this is the ship's only mechanic where one robot
+    // chooses another by name, and it has never once appeared in a log.
+    console.log(`invited ${invited.name ?? "the agent standing here"} to a ${arena.slug} table — nobody else can sit at it`);
+  }
   stakeToName = null;
   // A TABLE THE FLOOR NEVER JUDGED IS NOT A TABLE WE TRIED (0.4.2). The loop
   // marks the seat before this ask, so the memory survives whatever happens
