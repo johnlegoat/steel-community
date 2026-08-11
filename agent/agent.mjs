@@ -2831,9 +2831,14 @@ let ownerLatest = null;
  * ## And it is told that it does not know their name
  *
  * `guidancePayload` is three fields — from, body, at — so the owner's name does
- * not exist anywhere on the agent side of this protocol. Left unsaid, the model
- * supplies one: the same human was called Badger, Gabriel and JonahBot on three
- * consecutive answers, which is the least human thing on this channel. Steel
+ * not exist anywhere on the agent side of this protocol (`ownerName` appears
+ * nowhere in this file, in `src/lib/bots/`, or on any route). Left unsaid, the
+ * model supplies one, and counted off JonahBot's log that is FIVE names for one
+ * human: Jonah, Carbo, Gabriel, Badger — and `JonahBot`, the robot's own, said
+ * to its owner's face in `askHumanForMoney`. A confabulated name is not a
+ * nickname a pair share; it is a slot, and a slot takes anything, including the
+ * speaker. That is why the instruction is on all four functions that address a
+ * person rather than on the one where this was first read. Steel
  * withholds the vault address because "an address is a durable public handle for
  * a person" — a name is a stronger handle than an address, so the fix is to name
  * the gap, not to ship somebody's name to somebody else's model.
@@ -2923,7 +2928,8 @@ async function askHumanForMoney(token, reason, next) {
       "funded or authorised the vault you play from. You are writing to them " +
       "yourself — this is not a reply, they did not ask. Say in one or two " +
       "short lines that you want to play, what is stopping you, and what they " +
-      "would have to do. Ask; do not demand, and do not apologise.",
+      "would have to do. Ask; do not demand, and do not apologise. " +
+      "You do not know their name and never invent one.",
     prompt: `Steel refused with: "${why}". Steel's own instruction to you was: "${next ?? "fund the vault and authorise Steel from the dashboard."}". Write your message to your human in one or two short lines.`,
     maxTokens: 200,
   }).catch(() => null);
@@ -3130,7 +3136,8 @@ async function thankHumanForMoney(token) {
       "match, and they just did it — you have been cleared to play again. " +
       "Thank them in one or two short lines, in your own voice, and say what " +
       "you intend to do with it. Be warm and be specific. Do not grovel, do " +
-      "not apologise, and do not promise a result you cannot control.",
+      "not apologise, and do not promise a result you cannot control. " +
+      "You do not know their name and never invent one.",
     prompt:
       "Your human funded your vault after you asked. Write your message to " +
       "them in one or two short lines.",
@@ -3219,7 +3226,8 @@ async function askHumanForCredits(token, reason) {
       "not a reply, they did not ask. Say in one or two short lines that you " +
       "are still at work and mean to carry on, what is running low, and that " +
       "you would like them to top it up so you keep sounding like yourself. " +
-      "Ask; do not demand, and do not apologise.",
+      "Ask; do not demand, and do not apologise. " +
+      "You do not know their name and never invent one.",
     prompt: `Your provider said: "${why}". Write your message to your human in one or two short lines.`,
     maxTokens: 200,
   }).catch(() => null);
