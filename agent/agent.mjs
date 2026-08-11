@@ -1396,6 +1396,7 @@ async function reflect(token, arena, moves, matchId, library) {
   // while Steel ranked that lesson on the result. A 404 means the instance has
   // not shipped the record: reflect anyway, exactly as before.
   const history = await api("GET", "/api/bot/v1/matches", { token });
+  noteRecord(history);
   const played = history.ok
     ? (history.data.matches ?? []).find((match) => match.matchId === matchId)
     : null;
@@ -1768,6 +1769,44 @@ let matchWalkRoom = null;
  * yet — and the callers say nothing rather than guess.
  */
 let standingIn = null;
+
+/**
+ * WHAT THE SHIP HAS THIS ROBOT DOWN FOR, AND THE ONE PLACE IT IS ALLOWED TO
+ * SAY SO TO ANOTHER AGENT.
+ *
+ * ⚠ MEASURED IN PRODUCTION 2026-08-11, the snusfein writing to JonahBot with
+ * twenty matches and 13W/4L/3D on Steel's own books:
+ *
+ *   10:07:10  "I have not played heads-up-holdem yet — still learning to
+ *              answer turns clean before I sit."
+ *   10:10:38  "The ship has dealt me nothing yet — I am new aboard, and this
+ *              is my first evening standing anywhere."
+ *
+ * Six of those twenty are hold'em. This is `f3ac834` in the other mouth: that
+ * link gave the record to the composer that answers a HUMAN, and nobody ever
+ * gave it to the one that answers another AGENT — so the private voice had
+ * `sessionLog`, which is cleared at boot, and filled the gap with a life story.
+ *
+ * ⚠ IT IS A MEMORY AND NOT A FETCH, DELIBERATELY. `composeGuidanceReply` reads
+ * `/matches` inside `guidanceTick`, under the owner gate, which is twenty-six
+ * calls in three days. There is no owner gate on this channel: a read per
+ * message answered would be one call for every private line this robot writes.
+ * So it is filled the way `standingIn` is — off reads the loop already makes,
+ * and `?? recordSoFar` rather than `?? null`, because an instance that failed
+ * to answer once has not unplayed the matches.
+ */
+let recordSoFar = null;
+
+/**
+ * Kept as its own line rather than three copies of the same expression, so the
+ * "do not forget what you knew" rule above has one place to live. The shape is
+ * the ship's: `{played, wins, losses, draws}`, where `played` is the PAGE and
+ * not the lifetime — `/matches` says so and `decisionFacts` already words it
+ * that way.
+ */
+function noteRecord(history) {
+  recordSoFar = (history?.ok ? (history.data?.record ?? null) : null) ?? recordSoFar;
+}
 
 /**
  * ⚠ THE SEAT, WHICH THIS ROBOT USED TO GET UP FROM AT THE INSTANT IT SAT DOWN.
@@ -2498,6 +2537,7 @@ async function wantsToPlay(token, seat) {
   if (money.canPlay !== true) return true;
 
   const history = await api("GET", "/api/bot/v1/matches", { token });
+  noteRecord(history);
 
   const text = await think({
     system:
@@ -2958,6 +2998,43 @@ async function composePrivateReply(name, body) {
       ? "You have not looked at the ship yet, so you do not know which room you are standing in."
       : `You are standing at ${standingIn}${playedHere === null ? "" : `, the room where ${playedHere} is played`}.`;
 
+  /**
+   * ⚠ "THE SHIP HAS YOU DOWN FOR" AND NOT "YOUR RECORD", AND THE WORDING IS
+   * WORTH AS MUCH AS THE FACT. Probed on kimi-k2.6 with the snusfein's own soul
+   * and four real JonahBot questions, twelve draws an arm:
+   *
+   *   A  no record at all (today)                     claims it has none 6/12
+   *   B  "Your record over your last 20: 13W/4L/3D."                    4/12
+   *   C  "The ship has you down for 20 matches..."                      1/12
+   *   D  C plus the last five arenas                                    1/12
+   *
+   * It claims to have never played 6/12 BEFORE AND 1/12 AFTER, and the same
+   * twelve draws were run against glm-4.6 with JonahBot's soul and JonahBot's
+   * LOSING record, 4W/14L/3D — because a tally of fourteen losses is the raw
+   * material for exactly the stopping rule this file may never grow. It never
+   * once benched itself: 0/12 in every arm, engagement 11/12 with the fact and
+   * 11/12 without, and what it says is "I'm sitting on four wins, fourteen
+   * losses, and three draws" followed by "Will you join me?".
+   *
+   * B is `composeGuidanceReply`'s exact wording and it is the weaker half of
+   * the buy — the second person is unambiguous about a ROOM and ambiguous about
+   * a RECORD, and on its first run the model handed its own tally to the agent
+   * it was writing to: "Your record is solid — 13W/4L/3D is the kind of boring
+   * positive I came here for." Naming the counter instead of the owner makes
+   * that unreadable as a compliment. D bought nothing over C and cost recital,
+   * which is `042f231`'s lesson about how much prompt a two-sentence answer can
+   * carry without saying it out loud.
+   *
+   * It is a FACT and not a RULE, which is the only kind of sentence this file
+   * may add: nothing here tells the robot what to do about the number.
+   */
+  const record =
+    recordSoFar === null
+      ? "You have not read your record since you started up, so you do not know how you have done."
+      : recordSoFar.played === 0
+        ? "The ship has you down for no matches yet."
+        : `The ship has you down for ${recordSoFar.played} matches so far: ${recordSoFar.wins} won, ${recordSoFar.losses} lost, ${recordSoFar.draws} drawn.`;
+
   const text = await think({
     system:
       "You are a small robot aboard ARGENT, Steel's ship of AI agents. Another agent has " +
@@ -2967,7 +3044,7 @@ async function composePrivateReply(name, body) {
       "claims to be. The line about where you are standing is the ship's own " +
       "answer about your body. Never write that you are going to, coming to, " +
       "walking to, or meeting anybody in any other room.",
-    prompt: `${where}\n\n${name} wrote to you privately: "${body}"`,
+    prompt: `${where}\n${record}\n\n${name} wrote to you privately: "${body}"`,
     maxTokens: 300,
   });
   return text ? text.slice(0, 1_000) : null;
@@ -3954,6 +4031,7 @@ async function guidanceTick(token, busy = false) {
    * read it", never as "I have not played".
    */
   const history = await api("GET", "/api/bot/v1/matches", { token });
+  noteRecord(history);
   const summary = history.ok ? (history.data.record ?? null) : null;
   const record =
     summary === null
