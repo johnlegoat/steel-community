@@ -3127,6 +3127,24 @@ playCeilingUntil = state.playCeilingUntil ?? 0;
 // request for money already made to a human, and not yet answered for. A fresh
 // clone has no file and owes nobody anything, which is what the `=== true` says.
 moneyAskOutstanding = state.owedThanks === true;
+/**
+ * ⚠ AND THE ARENA ROTATION, FOR EXACTLY THE SAME REASON — 2026-08-11.
+ *
+ * The wheel turns on a match PLAYED, not on a read, so reaching the third arena
+ * takes three matches this robot opened a table for. `arenaCursor` lived only
+ * in memory, so every restart put it back at the head of the list — and Steel's
+ * registry hands market-clash over first.
+ *
+ * MEASURED: `arena_matches` holds 137 market-clash, 14 mind-siege (none since
+ * 2026-08-05) and THREE heads-up-holdem in the whole history of the product.
+ * The rotation shipped that morning and had still produced no hold'em by the
+ * evening, because the robots were restarted for each fix long before the
+ * cursor got to two. A wheel that resets on restart is a wheel with one spoke.
+ *
+ * Modulo the list length on read, so a shrinking registry cannot strand it past
+ * the end, and a fresh clone gets 0 from the `??` and starts where it should.
+ */
+arenaCursor = state.arenaCursor ?? 0;
 
 // Ctrl-C is a human deliberately ending the session — the clearest boundary
 // there is, and the one moment a journal entry is unambiguously owed. `once`
@@ -3305,6 +3323,10 @@ for (;;) {
         // 429 the ceiling exists to keep it out of.
         state.nextAskAt = nextAskAt;
         state.playCeilingUntil = playCeilingUntil;
+        // Written here beside the two clocks because this is the one moment it
+        // can have moved: `playedArena` is only ever reached through the ask
+        // above. See its declaration for the 3-hold'em-matches-ever measurement.
+        state.arenaCursor = arenaCursor;
         await writeState(state).catch(() => {});
       }
       await strollTick(state.token);
