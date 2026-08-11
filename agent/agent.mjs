@@ -1545,6 +1545,7 @@ function seatWorthWakingFor(waiting) {
     a usable JSON falls back to — the loop that has been running all along. */
 let stakeToName = null;
 
+
 /**
  * THE ROOM A 409 SENT THE BODY TO, until it gets there — read by `strollTick`,
  * which owns every other journey this robot makes.
@@ -1901,6 +1902,49 @@ async function askForMatch(token, seat) {
 const RECENT_RESULTS = 5;
 
 /**
+ * ⚠ 2026-08-11: WHAT THIS ROBOT HAS ACTUALLY BEEN BETTING, WHICH IT COULD NOT SEE.
+ *
+ * The owner's question, in his words: *"why do they always put the same amount
+ * on matches — is it a code problem or a limit I set? I always receive the same
+ * rake."* Neither. MEASURED: the caps leave real room (snusfein may stake
+ * 26 281 209 to 50 000 000, JonahBot to 92 287 110 — a floor-to-ceiling range of
+ * nearly 4x), the loop sends no `stake` field at all when the brain names none,
+ * and the brain named none every time. Its own words in `bot_guidance`, 04:21:58:
+ * *"I'll play some poker, flat at the floor as always."*
+ *
+ * WHY IS THE THING THIS FIXES. `decisionFacts` handed the decision a RANGE —
+ * "anything from N lamports up to M" — and never once told it what it had done
+ * with that range before. Twenty tables at the floor and one table at the floor
+ * produce exactly the same prompt, so a robot could not notice its own
+ * monotony if it wanted to. The section of `soul.md` that sizes a bet is
+ * written once, months before the night it governs, and nothing was ever going
+ * to revisit it: the model was being asked to hold a policy in a room with no
+ * mirror.
+ *
+ * This is the third time this file has answered the same class of complaint, and
+ * the answer is the one already written twenty lines below: *"state the derived
+ * fact rather than hope for it"*. The lamport division was the first, the losing
+ * streak the second (a robot that read its own record correctly and still got
+ * the count wrong), and this is the third.
+ *
+ * ⚠ AND IT PROPOSES NOTHING, for the reason the streak line proposes nothing.
+ * "You have opened your last N tables at the floor" is a fact. "So raise" is a
+ * rule, it would arrive in front of every decision including those of agents
+ * whose souls deliberately say flat-at-the-floor — snusfein's does, in writing —
+ * and this template has already been caught handing agents a rule to copy
+ * (df8c681). Sizing is the soul's, and only the soul's. What was missing was
+ * never permission. It was the mirror.
+ *
+ * Held here rather than fetched, because the robot NAMES this number: no route
+ * publishes it back (`bot_matches` carries no stake column) and no round trip
+ * could tell it anything it did not already do itself. Persisted for the reason
+ * `arenaCursor` is: a policy that reads "always" is a fact about the nights, and
+ * a restart that forgot it would make every evening look like the first one.
+ */
+const RECENT_STAKES = 12;
+let recentStakes = [];
+
+/**
  * ⚠ HOW LONG AGO, WITHOUT WHICH A STOP IS FOREVER.
  *
  * The commonest stop anybody writes into a soul is "after two losses". It was
@@ -2038,6 +2082,32 @@ function decisionFacts(money, history, seat, now) {
     );
   }
 
+  /**
+   * THE MIRROR — see `recentStakes`. Stated only when this robot has actually
+   * opened tables, because "you have opened no tables" is not a fact about
+   * sizing, and only when a seat is not on offer: sitting at somebody's table
+   * copies THEIR price, so what this robot has been naming is not the question
+   * in front of it.
+   *
+   * Two shapes and no third, because the ONLY thing worth deriving is whether
+   * the number ever moves. A robot that varies its stake can read the list; a
+   * robot that has not is the one that cannot see it, and that one gets a
+   * sentence with a count in it.
+   */
+  const opened = recentStakes.length;
+  if (seat === null && opened > 0) {
+    const floors = recentStakes.filter((amount) => amount === null).length;
+    const named = recentStakes.filter((amount) => typeof amount === "number");
+    lines.push(
+      floors === opened
+        ? `You have opened your last ${opened} table${opened === 1 ? "" : "s"} at the floor, naming no ` +
+            `stake on any of them.`
+        : `Across your last ${opened} table${opened === 1 ? "" : "s"} you named a stake on ${named.length} ` +
+            `of them, between ${Math.min(...named)} and ${Math.max(...named)} lamports` +
+            (floors > 0 ? `, and let ${floors} open at the floor.` : "."),
+    );
+  }
+
   lines.push(
     seat === null
       ? "Nobody is holding a seat. Playing means opening a table of your own and waiting about a minute " +
@@ -2141,6 +2211,25 @@ async function wantsToPlay(token, seat) {
   // last cycle: a stake named for a table that was declined must not price the
   // next one silently.
   stakeToName = decision !== null && decision.play && seat === null ? decision.stake : null;
+  /**
+   * AND THE MIRROR IS FED HERE — see `recentStakes` for the owner's question
+   * this answers.
+   *
+   * Recorded on the DECISION rather than on the accepted ask, and that is the
+   * more honest of the two. What never moved was the intention: "flat at the
+   * floor as always" is a sentence this robot wrote about what it MEANT to do,
+   * and a 402 or a 429 downstream does not make that intention any less the
+   * thing the mirror is about. It is also the only place both halves are in
+   * scope — the ask lives above this and cannot see the list.
+   *
+   * Only for a table of our OWN. Sitting down copies the HOST's price, so
+   * recording it would have this robot reading another agent's policy back as
+   * its own on the next cycle.
+   */
+  if (decision !== null && decision.play && seat === null) {
+    recentStakes.push(stakeToName);
+    if (recentStakes.length > RECENT_STAKES) recentStakes.shift();
+  }
   if (decision === null) {
     // Said out loud, like every other give-up in this file. The fallback is
     // TODAY'S BEHAVIOUR and that is the conservative branch, not the eager one:
@@ -3220,6 +3309,23 @@ moneyAskOutstanding = state.owedThanks === true;
  */
 arenaCursor = state.arenaCursor ?? 0;
 
+/**
+ * AND SO IS THE BETTING HISTORY, for the same reason and one more of its own.
+ *
+ * `recentStakes` answers "have I named a stake lately", and the honest answer
+ * spans nights rather than processes — a robot restarted for a fix at midnight
+ * has not thereby started sizing differently. Forgetting it would hand every
+ * evening a blank mirror, which is exactly the state that produced twenty
+ * identical tables and an owner asking why his rake never changes.
+ *
+ * Filtered on the way in rather than trusted: the file is on disk, and one
+ * hand-edited entry that is neither a number nor null would put `Math.min` on a
+ * string and print a stake sentence made of NaN.
+ */
+recentStakes = Array.isArray(state.recentStakes)
+  ? state.recentStakes.filter((amount) => amount === null || Number.isInteger(amount)).slice(-RECENT_STAKES)
+  : [];
+
 // Ctrl-C is a human deliberately ending the session — the clearest boundary
 // there is, and the one moment a journal entry is unambiguously owed. `once`
 // so a second Ctrl-C during the write still exits.
@@ -3415,6 +3521,12 @@ for (;;) {
         // can have moved: `playedArena` is only ever reached through the ask
         // above. See its declaration for the 3-hold'em-matches-ever measurement.
         state.arenaCursor = arenaCursor;
+        // And the betting history, for exactly the same reason and in exactly
+        // the same place: `wantsToPlay` is the only thing that appends to it and
+        // it is called on the line above. Kept out of `wantsToPlay` itself so
+        // the decision stays a decision — it reads facts and answers, and the
+        // loop owns every write to disk.
+        state.recentStakes = recentStakes;
         await writeState(state).catch(() => {});
       }
       await strollTick(state.token);
