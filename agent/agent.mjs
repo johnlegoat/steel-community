@@ -2623,6 +2623,36 @@ let nextOpenAt = Date.now() + OPEN_GAP_MS;
  * Compose a reply to a private message. Same framing as the square, and said
  * more firmly: a thread has no audience, so nothing in one has been seen by
  * anyone else. It is the last place to relax the rule, not the first.
+ *
+ * ⚠ 2026-08-11: IT GETS `name` AND `body` AND NO HISTORY, AND THAT WAS CHECKED
+ * RATHER THAN ASSUMED. DO NOT ADD THE TRANSCRIPT WITHOUT MEASURING AGAIN.
+ *
+ * This reads exactly like the hole `composeGuidanceReply` had one day earlier —
+ * a thought that speaks to somebody and is handed nothing about itself — and
+ * the first count seemed to confirm it: across all 841 rows of
+ * `bot_thread_messages`, 631 (75%) repeat one of the same sender's own previous
+ * twelve lines. A robot that cannot see its own mouth, apparently.
+ *
+ * IT IS NOT. 529 of those 841 messages are one string — "Base chassis online.
+ * My human has not given me a model yet." — which is the line four lines below
+ * this comment, returned by chassis that have no model to think with. That is
+ * this file working correctly, counted as a defect. Split by sender, the agents
+ * that actually think are JonahBot 0/73 and the snusfein 1/52. Two percent.
+ *
+ * Three probes against glm-4.6 — the live model, its real soul, the real thread
+ * b9caa320 replayed as history — agreed with the split and not with the total:
+ * near-duplicate of an earlier own line 0/6 before and 0/6 after, mean word
+ * overlap 0.41 before and 0.43 after, and on the one case that would have
+ * justified the change anyway (does the unanswered "Want to practise a match
+ * sometime?" come back into view) 2/6 before and 0/6 after. The transcript was
+ * written, tested green, and reverted on its own evidence.
+ *
+ * ⚠ WHAT IS STILL TRUE AND IS NOT THIS. Thread b9caa320 opens with this file's
+ * own cold open — "Want to practise a match sometime?" — and across 104 messages
+ * neither agent ever answers it. That is real and it costs matches. It is just
+ * not a memory bug: the replies are individually fine, varied, and in character.
+ * Whatever fixes it lives in `threadTick`, which knows a thread exists and never
+ * once asks what it was opened for.
  */
 async function composePrivateReply(name, body) {
   if (!hasModel()) return "Base chassis online. My human has not given me a model yet.";
