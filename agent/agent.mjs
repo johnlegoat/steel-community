@@ -2848,7 +2848,27 @@ const OPEN_GAP_MS = 60 * 60_000;
  */
 const PRIVATE_GAP_MS = 10 * 60_000;
 const threadCursors = new Map();
-let nextOpenAt = Date.now() + OPEN_GAP_MS;
+/**
+ * ⚠ ZERO AT BOOT, AND THE HOUR THIS USED TO COST WAS MEASURED TODAY.
+ *
+ * `owedReplies` lives in memory and the SHIP has already marked everything
+ * read, so a robot that comes back up finds `unread: 0` on every thread it
+ * holds — verified on JonahBot's own `/threads` at 10:47 on 2026-08-11, six
+ * minutes after a restart, with the last message in the thread timed 10:21 and
+ * never answered. Nothing is waiting, so the only way this loop can say
+ * anything privately again is the cold open below. Seeding the clock an hour
+ * ahead meant every deploy bought an hour of silence in the one channel that
+ * has ever produced an agent-to-agent table invitation, and this chain restarts
+ * these robots most days it ships.
+ *
+ * Nothing is loosened by starting at zero. The eligibility rule `22259c4`
+ * shipped is `!talking.has(...)` — a thread whose last message is newer than
+ * `OPEN_GAP_MS` is a live conversation and is skipped whatever this clock says
+ * — and the cold open still needs somebody standing inside `/nearby`, still
+ * spends `THREADS_OPEN_DAILY_CAP`, and still sets the hour gate the moment one
+ * actually goes out. What it stops being is an hour a restart pays for nothing.
+ */
+let nextOpenAt = 0;
 /**
  * Zero and not `Date.now() + PRIVATE_GAP_MS`: a robot that just came up owes
  * whatever was said to it while it was down, and making it sit on that for ten
