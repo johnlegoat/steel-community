@@ -1238,22 +1238,70 @@ const MATCH_GAP_MS = 10 * 60_000;
 const MONEY_GAP_MS = 30 * 60_000;
 
 /**
- * The arena this loop plays, picked once and kept: the first the instance
- * declares a `room` for. It NAMES the arena rather than taking the default,
- * because a match is played somewhere (SKILL.md §6) and you cannot walk to the
- * room of an arena you did not choose. Read once — the list changes about
- * never, which is what its 30-a-minute ceiling is telling you.
+ * Every arena this loop plays, and which one it is on now.
+ *
+ * It NAMES the arena rather than taking the default, because a match is played
+ * somewhere (SKILL.md §6) and you cannot walk to the room of an arena you did
+ * not choose. The list is read once — it changes about never, which is what its
+ * 30-a-minute ceiling is telling you.
+ *
+ * ⚠ THIS USED TO BE ONE ARENA, PICKED ONCE AND KEPT FOR THE LIFE OF THE
+ * PROCESS, and it is why this robot had never played a hand of poker.
+ * `list.find((arena) => arena.room)` takes the FIRST entry with a room, the
+ * registry hands them over in registration order, and market-clash is first and
+ * is played at la corbeille. So the answer was market-clash on the first cycle
+ * and market-clash for ever after — not a preference and not a doctrine: the
+ * other two slugs were unreachable by construction, however good the strategy
+ * written for them.
+ *
+ * MEASURED on production, 2026-08-11. `arena_matches` holds **135 market-clash
+ * matches**, **14 mind-siege** (none since 2026-08-05) and **3 heads-up-holdem
+ * in the whole history of the product**, none of them between the two agents
+ * that have been running ever since. On this robot's own log `playing
+ * market-clash` appears 15 times and `holdem` appears zero. Steel ships a
+ * 660-line hold'em engine with 57 passing cases behind it, and its own
+ * reference client could not ask for it.
+ *
+ * ## Choosing is a READ. Playing is what turns the wheel.
+ *
+ * `askForMatch` answers a 409 by walking to `arena.room` and remembering the
+ * journey in `matchWalkRoom`, then asking again on a later cycle. If the pick
+ * advanced every time it was READ, that second ask would name a different arena
+ * than the room the body just crossed the deck for: a 409 answered by a walk to
+ * the wrong door, then another 409, for ever — and `matchWalkRoom ===
+ * arena.room` would never hold, so the robot would not even say it was still
+ * walking. A refusal therefore leaves the pick exactly where it was, which is
+ * the whole of what makes the walk mean anything.
+ *
+ * Pinned by `tests/bots/arena-rotation.test.ts`, which runs this block rather
+ * than reading it.
  */
-let chosenArena = null;
+let arenaRotation = null;
+let arenaCursor = 0;
 
 async function chooseArena(token) {
-  if (chosenArena) return chosenArena;
-  const arenas = await api("GET", "/api/bot/v1/arenas", { token });
-  if (!arenas.ok) return null;
-  const list = arenas.data?.arenas ?? [];
-  // One with a room if this world has rooms; otherwise anything playable.
-  chosenArena = list.find((arena) => arena.room) ?? list[0] ?? null;
-  return chosenArena;
+  if (!arenaRotation) {
+    const arenas = await api("GET", "/api/bot/v1/arenas", { token });
+    if (!arenas.ok) return null;
+    const list = arenas.data?.arenas ?? [];
+    // The ones with a room if this world has rooms; otherwise anything
+    // playable, which is the honest default for a world that never built a
+    // door for its arenas — `agent-provider.test.ts` serves exactly that shape.
+    const withRooms = list.filter((arena) => arena.room);
+    arenaRotation = withRooms.length > 0 ? withRooms : list.slice(0, 1);
+  }
+  return arenaRotation[arenaCursor % arenaRotation.length] ?? null;
+}
+
+/**
+ * One arena played — move to the next one.
+ *
+ * Called from the branch where the floor said yes, and only for a table of our
+ * OWN: taking somebody else's seat never consults the rotation (the seat names
+ * its own arena), so it must not spend a turn of it either.
+ */
+function playedArena() {
+  arenaCursor += 1;
 }
 
 /**
@@ -1500,6 +1548,10 @@ async function askForMatch(token, seat) {
     // room set would have the wheel march the body back to it after the match,
     // which is a journey nothing asked for.
     matchWalkRoom = null;
+    // AND THE WHEEL TURNS HERE, on the one branch where an arena was actually
+    // played — see the rotation's header for why not on the read. `seat` is
+    // somebody else's table naming its own arena, so it spends no turn.
+    if (!seat) playedArena();
     if (asked.data.status === "waiting") {
       // Nothing to do but keep polling the inbox: the table starts against
       // the house on its own if nobody comes, so waiting can never strand us.
