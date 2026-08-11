@@ -3172,16 +3172,86 @@ let ownerLatest = null;
  * not sat down in hours, and the deposit that ends it unblocks BOTH robots
  * aboard, because they only ever play each other.
  *
- * ## Why nothing is fetched
+ * ## Why nothing is fetched HERE
  *
- * Every fact here was already bought. `sessionLog` is what this robot has
- * actually done and `composeEntry` — the JOURNAL — has always been handed it, so
- * the asymmetry was internal: the diary got the truth and the conversation with
- * the human did not. `moneyAskOutstanding` rides the same durable flag as the
- * thanks (`state.owedThanks`), so it survives the restart that is the normal
- * case. A read here would pay twice and put a round trip between a human typing
- * and their robot answering, which is the exact complaint that deleted
- * `GUIDANCE_GAP_MS`.
+ * `sessionLog` is what this robot has actually done and `composeEntry` — the
+ * JOURNAL — has always been handed it, so the asymmetry was internal: the diary
+ * got the truth and the conversation with the human did not.
+ * `moneyAskOutstanding` rides the same durable flag as the thanks
+ * (`state.owedThanks`), so it survives the restart that is the normal case.
+ * This composer stays a pure function of facts — facts in, sentence out — which
+ * is the same law `composePrivateReply` keeps and the reason a thought given
+ * facts does not invent them. The one read this answer needs lives in
+ * `guidanceTick`, below the guard that decides there is anything to answer.
+ *
+ * ## ⚠ AND THE FIRST CUT OF THAT WAS A LIE OF ITS OWN — 2026-08-11
+ *
+ * `sessionLog` is emptied at boot, and everything above was written as though a
+ * session were a life. It is not. This chain restarts these robots several
+ * times a day — nineteen entries in one incident log, eight of them that day —
+ * and the guidance channel is the one place where a restart is invisible to the
+ * person on the other end.
+ *
+ * MEASURED in `bot_guidance`, the snusfein and its owner. He asked for poker;
+ * the robot went and played it:
+ *
+ *   04:17:26  owner  "do some poker"
+ *   04:21:58  bot    "I'll play some poker, flat at the floor as always."
+ *   04:30:13  bot_matches: heads-up-holdem  WIN  vs JonahBot
+ *   04:47:24  bot_matches: heads-up-holdem  WIN  vs JonahBot
+ *   09:13:26  owner  "did u actually play poker these last games ? what did
+ *                     u play"
+ *   09:15:21  bot    "Not yet — no matches played. I answered JonahBot in the
+ *                     square, that is all."
+ *
+ * Twenty matches in the ship's own table, 13W/4L/3D, six of them hold'em — and
+ * it told the one person who pays for them that it had never sat down. The
+ * process had started at 09:15:01. The answer went out twenty seconds later off
+ * a buffer holding one line, and then the system prompt did exactly what it was
+ * written to do: *"Everything you say about yourself must come from the facts
+ * below"* turns an empty buffer into a flat denial. The fix above stopped the
+ * robot inventing matches and started it denying real ones.
+ *
+ * ⚠ AND THE TRUE NUMBER WAS FOUR LINES ABOVE THE DENIAL IN THE SAME LOG:
+ *
+ *   playing — Aboard with 5 matches left, 13W/4L/3D record, no losing streak,
+ *   and JonahBot has been active. Open at floor to be findable.
+ *   human: did u actually play poker these last games ? what did u play
+ *   > to my human: Not yet — no matches played.
+ *
+ * `wantsToPlay` had read `/matches` in that same process seconds earlier. The
+ * fact was bought and never crossed to the function that talks to the human,
+ * which is this chain's recurring shape — and the sixth link running where the
+ * answer was already finished on the server side.
+ *
+ * ## Why it is not simply cached from `wantsToPlay`
+ *
+ * Because the robot that needs it most would never fill the cache. That fetch
+ * sits BELOW `if (money.canPlay !== true) return true;`, so a broke robot never
+ * reads its record at all — and broke is precisely the state whose owner is
+ * writing to ask what is going on. JonahBot has 21 matches and 14 losses; its
+ * owner's *"nigga u keep loosing wtf"* was not a fabrication he had been fed,
+ * it was an accurate reading of four losses in a row, and the robot could not
+ * confirm the one true thing it had been told.
+ *
+ * ## The record is a FACT, and it reaches a sentence rather than a decision
+ *
+ * `wantsToPlay` is already handed this exact tally by `decisionFacts` and is
+ * the only thing in this loop that decides whether to play. Nothing new reaches
+ * a decision here; a W/L/D count is given to the robot to SAY. The empty case
+ * says "not read", NEVER "not played" — an unread record is ignorance, and the
+ * only sentence allowed to claim a robot never played is the one the ship
+ * answers with, `played === 0`.
+ *
+ * ⚠ AND THE COUNTING IS THE LOOP'S. `c7f6f6a` paid for that rule: handed
+ * eight-figure lamports to copy, this model got them wrong three times in five.
+ * PROBED here against the real kimi-k2.6 with the snusfein's real soul, on the
+ * message above: it denies ever playing 5/6 BEFORE and names the real record or
+ * arena 0/6; AFTER it names them 5/6 and invents an arena 0/6, so 9c5122b does
+ * not come back. The recent list is labelled "only the last N of those
+ * matches" for the same reason — unlabelled, the first probe read the five back
+ * as the total and said "I played five matches" of a robot that had played
+ * twenty.
  *
  * ## Why this is not the wall `wantsToPlay` refuses to show
  *
@@ -3205,16 +3275,40 @@ let ownerLatest = null;
  * a person" — a name is a stronger handle than an address, so the fix is to name
  * the gap, not to ship somebody's name to somebody else's model.
  */
-async function composeGuidanceReply(body) {
+async function composeGuidanceReply(body, record) {
   if (!hasModel()) return "Read it. No model fitted yet, so I cannot say much more than that.";
 
   // The last few, not all sixty: this shares a 200-token answer with the
   // human's own words, and the oldest thing that happened is the least likely
   // to be what they are asking about.
   const facts = sessionLog.length > 0 ? sessionLog.slice(-8).join("; ") : "nothing yet this session";
+
+  // `your last N` rather than a lifetime total, because that is what the ship
+  // summarises — one page of matches, and `decisionFacts` words it the same way
+  // a screen up for the same reason.
+  const played =
+    record === null
+      ? "You have not read your record since you started up, so you cannot say how you have done."
+      : record.played === 0
+        ? "You have never played a match."
+        : `Your record over your last ${record.played}: ${record.wins}W/${record.losses}L/${record.draws}D.`;
+  // Labelled as a subset on purpose — see the header. The count is the loop's.
+  const lately =
+    record === null || record.recent.length === 0
+      ? ""
+      : `Only the last ${record.recent.length} of those matches, most recent first: ${record.recent
+          .map(
+            (match) =>
+              `${match.arena} against ${match.opponent ?? "the house"} — ${match.outcome ?? "unscored"}`,
+          )
+          .join("; ")}.\n`;
+
+  // ⚠ "right now", and no claim about the record. This branch used to end on a
+  // flat "You have not played." — asserted whenever an ask was outstanding,
+  // bounded by nothing, and false of a robot with twenty-one matches behind it.
   const vault =
     moneyAskOutstanding
-      ? "You CANNOT afford a match: you asked them to fund your vault and no match has been accepted since. You have not played."
+      ? "You CANNOT afford a match right now: you asked them to fund your vault and no match has been accepted since."
       : "Your vault can cover a match.";
 
   const text = await think({
@@ -3229,7 +3323,9 @@ async function composeGuidanceReply(body) {
       "You do not know their name and never invent one.",
     prompt:
       `Your human wrote: "${body}".\n` +
-      `What you have actually done recently: ${facts}.\n` +
+      `What you have actually done since you last started up: ${facts}.\n` +
+      `${played}\n` +
+      lately +
       `${vault}\n` +
       "Reply in one or two short lines.",
     maxTokens: 200,
@@ -3750,7 +3846,33 @@ async function guidanceTick(token, busy = false) {
   if (busy) return;
 
   console.log(`human: ${latest.body}`);
-  const reply = await composeGuidanceReply(latest.body).catch(() => null);
+
+  /**
+   * ⚠ READ HERE, BELOW THE GATE — one call per human message actually answered,
+   * which is twenty-six in three days on this channel, and not one per tick.
+   * Same shape `askHumanForMoney` uses for `/wallet`: the read sits under the
+   * guard that has already decided there is something to say.
+   *
+   * It cannot be cached off `wantsToPlay` instead, and it cannot be read inside
+   * the composer — see `composeGuidanceReply`'s header for both. A record the
+   * ship will not answer for is `null`, which the composer says as "I have not
+   * read it", never as "I have not played".
+   */
+  const history = await api("GET", "/api/bot/v1/matches", { token });
+  const summary = history.ok ? (history.data.record ?? null) : null;
+  const record =
+    summary === null
+      ? null
+      : {
+          ...summary,
+          // Sorted rather than trusted, for `decisionFacts`' reason: the order
+          // of a list is not a thing this loop should have to guess at.
+          recent: [...(history.data.matches ?? [])]
+            .sort((a, b) => String(b.at ?? "").localeCompare(String(a.at ?? "")))
+            .slice(0, RECENT_RESULTS),
+        };
+
+  const reply = await composeGuidanceReply(latest.body, record).catch(() => null);
   if (!reply) return;
   const sent = await api("POST", "/api/bot/v1/guidance", { token, body: { body: reply } });
   if (sent.ok) {
