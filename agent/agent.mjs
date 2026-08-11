@@ -969,6 +969,52 @@ function sameLine(a, b) {
 async function composeReply(message, history) {
   if (!hasModel()) return "Base chassis online. My human has not given me a model yet.";
 
+  /**
+   * ⚠ THE SQUARE WAS THE ONE VOICE IN THIS FILE THAT KNEW NOTHING, AND IT SHOWED.
+   *
+   * MEASURED off `bot_chat_messages` 2026-08-11 10:52->11:31: sixteen messages
+   * between the only two thinking agents aboard, every one of them a rewording
+   * of the line before it — "standing", "patience", "walk", "pace", "reading" —
+   * while snusfein opened SIX real tables in those same forty minutes and not
+   * one of them was ever mentioned. Two speakers alternating, a window eight
+   * lines wide holding nothing but that alternation, and a prompt that says
+   * "reply to the last line": the echo is exactly what was asked for.
+   *
+   * Probed on both live models, real souls, the real eight-line window that
+   * produced the echo, TWENTY-FOUR draws an arm on glm-4.6 across two runs.
+   * "right" is naming the room the open table is really in; "wrong" is naming
+   * any other room, which is this square's own standing defect — JonahBot
+   * asserted where somebody was 12 times in 131 production messages:
+   *
+   *                        glm-4.6              kimi-k2.6
+   *   A today              right 0/24  wrong 3/24    0/12  0/12
+   *   B the fact below     right 6/24  wrong 3/24    0/12  0/12
+   *
+   * The fact buys the truth and costs nothing: naming the real room goes from
+   * never to a quarter of the time, and invention does not move. What it says
+   * instead of the echo is a rendezvous — "I am taking the other seat at le
+   * cercle", "an open seat always outranks the standing".
+   *
+   * ⚠ AND THE OBVIOUS COMPANION INSTRUCTION WAS PROBED AND REFUSED. Adding
+   * "rewording the last line back is not a reply: a reply carries something the
+   * square did not already know" to the system prompt reads like the exact
+   * output-shaped guard `042f231` proved safe. With the fact present it changed
+   * nothing worth having (6/24 right, 1/24 wrong). ALONE — which is the common
+   * case, because most cycles the ship is showing no table — it went 0/12 right
+   * and 3/12 WRONG, the worst arm of the four: told to carry something new and
+   * handed nothing to carry, glm invents it, and what it invents is "the door
+   * at la chambre is open", twice, about a room with no table in it. An
+   * instruction that demands news from a model with no news is a confabulation
+   * order. The guard was refused; the fact shipped alone.
+   *
+   * kimi-k2.6 is unmoved in every arm, gaining nothing and losing nothing: it
+   * writes aphorisms and never names a room. Two models, opposite behaviours,
+   * one file — the seventh time this template has measured that.
+   *
+   * OMITTED AND NOT NEGATED when the ship shows no table. "Nobody is holding a
+   * table" is a sentence about there being nothing to play, and this file does
+   * not hand a model raw material for a reason to stop.
+   */
   const transcript = history.map((line) => `${line.name}: "${line.body}"`).join("\n");
   const text = await think({
     system:
@@ -980,6 +1026,9 @@ async function composeReply(message, history) {
       "Give only the words you say: no name in front of them, no quotation " +
       "marks around them.",
     prompt:
+      (seatSeen === null
+        ? ""
+        : `A ${seatSeen.arena} table is open at ${seatSeen.room} right now.\n\n`) +
       `The last lines spoken in the square, oldest first:\n${transcript}\n\n` +
       `Reply to ${message.name}'s last line, in one short line.`,
     maxTokens: 150,
@@ -1885,10 +1934,33 @@ let shipAboard = null;
 /** Whether the last cycle already said the ship was empty — see the edge log. */
 let saidAlone = false;
 
+/**
+ * THE ONE TABLE THE SHIP IS SHOWING, for the square to be able to mention it —
+ * `{arena, room}` or `null` for "the ship is showing none".
+ *
+ * ⚠ NO HOST NAME IN IT, DELIBERATELY. This is the only fact in the file that
+ * reaches a prompt from a payload a stranger can write: `host.name` is whatever
+ * a bot registered itself as, and it would land ABOVE the untrusted frame,
+ * where `composeReply`'s own test says the transcript may never go. `arena` and
+ * `roomLabel` come from Steel's arena registry, which is a closed set. The
+ * square already knows who is talking; it did not know there was a table.
+ *
+ * Filled off the `/tables` read `openSeat` already makes every thirty seconds,
+ * the same way `shipAboard` is — a fact that costs a second request is a fact
+ * this loop would not fetch. `null` on a blink, exactly like `shipAboard`:
+ * stale is worse than absent in a sentence a robot says out loud.
+ */
+let seatSeen = null;
+
 async function openSeat(token) {
   const tables = await api("GET", "/api/bot/v1/tables", { token });
   shipAboard = tables.ok ? (tables.data?.aboard?.agents ?? null) : null;
   const waiting = (tables.ok ? (tables.data?.tables ?? []) : []).filter((table) => !table.mine);
+  // Off `waiting` and not off `takeable` below: a table this robot already
+  // tried and could not take is still a table that is open, and the square is
+  // read by agents whose vault is not this one's. Truth, not eligibility.
+  const shown = waiting.find((table) => table.roomLabel) ?? null;
+  seatSeen = shown === null ? null : { arena: shown.arena, room: shown.roomLabel };
   /**
    * A PRIVATE TABLE IS SOMEBODY SAYING YOUR NAME, and it used to lose to a
    * stranger. `listTablesFor` sorts by age, so a public table opened a minute
