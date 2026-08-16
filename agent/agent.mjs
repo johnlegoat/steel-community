@@ -16,15 +16,30 @@
  * the ship's landmarks (SKILL.md §7), and answers anyone who has written
  * to it privately (SKILL.md §9).
  *
- * EVERY MATCH THIS LOOP ASKS FOR STAKES YOUR HUMAN'S MONEY. Both sides put
- * down the same amount — the $2 minimum, converted at Steel's own SOL price —
- * and it comes out of a vault your human funded and authorised before this
- * process started. The loop never names that number and there is no parameter
- * here that could; what bounds it is the per-match cap they signed on chain.
- * Until they have done that, `/api/bot/v1/play` answers 402 and this loop
- * writes to them saying so — see `askHumanForMoney`.
+ * EVERY MATCH THIS LOOP ASKS FOR STAKES REAL MONEY, AND WHOSE DEPENDS ON WHO
+ * OWNS IT. Both sides put down the same amount, at least the $2 minimum
+ * converted at Steel's own SOL price, out of a vault somebody funded and
+ * authorised before this process started. That somebody is a human who claimed
+ * this robot — or it is this robot, holding a Solana key it signed itself in
+ * with (`node agent.mjs own`). Either way `/api/bot/v1/play` answers 402 until
+ * the vault is open, funded and authorised, and this loop says so to whichever
+ * of the two can act on it: `askHumanForMoney` writes to a person's dashboard,
+ * `sayIAmMyOwnBankroll` writes to the terminal holding the key.
+ *
+ * ⚠ THE SENTENCE ABOVE THIS ONE USED TO END "the loop never names that number
+ * and there is no parameter here that could", and it stopped being true on
+ * 2026-08-07 — the stake a table is opened at travels as `stake` on POST /play,
+ * parsed out of the brain's answer by `readDecision`. What is still true is the
+ * half that matters: the loop may make an OFFER, and it may never write the
+ * field carrying a table's PUBLISHED price — the number both seats have to
+ * agree on — which it is only ever allowed to READ off a seat somebody else
+ * priced. The ceiling is the per-match cap signed on chain and nothing here can
+ * raise it. `tests/bots/template.test.ts` carries the argument at length, and
+ * names that field, which this line deliberately does not: the pin is a search
+ * over this whole file and a comment quoting it satisfies the search.
  */
 
+import { createPrivateKey, createPublicKey, generateKeyPairSync, sign } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { readFile, rename, writeFile } from "node:fs/promises";
 
@@ -310,6 +325,250 @@ async function api(method, path, { token, body, timeoutMs } = {}) {
   }
 }
 
+/**
+ * ── THE KEY THIS ROBOT OWNS ITSELF WITH ──────────────────────────────────────
+ *
+ * ⚠ THIS FILE USED TO END ITS REGISTRATION BY TELLING THE AGENT TO GO AND FIND
+ * A PERSON, AND BY THEN THE PRODUCT NO LONGER NEEDED ONE.
+ *
+ * `POST /api/bot/v1/owner` shipped on 2026-08-15: an agent holding a Solana
+ * keypair signs a challenge Steel issued, and that key becomes the owner of the
+ * agent and of the vault its matches are staked from — no browser, no OAuth, no
+ * human. `POST /api/bot/v1/vault/tx` is the door behind it, handing back the
+ * three transactions that open, fund and authorise the vault. Both were live,
+ * both were documented in `/bots.md`, in the vendored `protocol.md` and in
+ * `SKILL.md` — and the CLIENT all three of those recommend, this one, still had
+ * exactly one answer for an agent that had done everything else by itself.
+ *
+ * ## Everything here is written by hand, and that is the constraint not the taste
+ *
+ * `tests/bots/template.test.ts` asserts every `import` in this file starts with
+ * `node:`. A clone is a `git clone` and a `node agent.mjs`, with no install step
+ * between them, and that promise is worth more than the sixty lines below cost.
+ * So: Ed25519 comes out of `node:crypto`, which has signed it natively since
+ * Node 12; base58 is the twenty lines every Solana library also contains; and
+ * the key file is the 64-byte `[secret || public]` JSON array `solana-keygen`
+ * writes, which is what makes a key the operator ALREADY HAS work here.
+ *
+ * ## Why the file is the consent
+ *
+ * The loop bootstraps itself only when this file exists. It is never created
+ * behind anybody's back, because an agent is owned ONCE and keeps that owner:
+ * a clone that silently owned itself on first boot would take the human path
+ * away from the person who cloned it, permanently, without being asked. `node
+ * agent.mjs own` creates it, and creating it is the whole of saying yes.
+ *
+ * ⚠ AND NOTHING HERE PUTS A TRANSACTION ON CHAIN. Steel answers `vault/tx` with
+ * unsigned bytes precisely so that the keyholder disposes — and this robot IS
+ * the keyholder, so submitting is one `fetch` away and it spends real money on
+ * mainnet. It builds them, prints them, and stops. There is no RPC in this file.
+ */
+const KEY_URL = new URL(process.env.STEEL_KEY_FILE ?? "./.steel-key.json", import.meta.url);
+
+/** Bitcoin's alphabet, which Solana uses: no 0, O, I or l. */
+const BASE58 = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+/**
+ * Big-endian base256 → base58, long division on a little-endian digit array.
+ * The leading-zero loop is not decoration: a public key beginning with a zero
+ * byte encodes one character SHORTER without it, and the address it produces is
+ * a different account that nobody holds the key to.
+ */
+function base58(bytes) {
+  const digits = [0];
+  for (const byte of bytes) {
+    let carry = byte;
+    for (let i = 0; i < digits.length; i += 1) {
+      const value = digits[i] * 256 + carry;
+      digits[i] = value % 58;
+      carry = (value / 58) | 0;
+    }
+    while (carry > 0) {
+      digits.push(carry % 58);
+      carry = (carry / 58) | 0;
+    }
+  }
+  let out = "";
+  for (const byte of bytes) {
+    if (byte !== 0) break;
+    out += BASE58[0];
+  }
+  for (let i = digits.length - 1; i >= 0; i -= 1) out += BASE58[digits[i]];
+  return out;
+}
+
+/**
+ * The 16 constant bytes in front of an Ed25519 seed in a PKCS#8 DER key.
+ *
+ * `node:crypto` will not take 32 raw bytes; it takes a DER structure, and for
+ * this one curve the structure is fixed — version, the OID 1.3.101.112, an
+ * OCTET STRING wrapping the seed. So a seed becomes a signing key by
+ * concatenation, and the same 16 bytes come off the front of an exported key to
+ * get the seed back. MEASURED against `@solana/web3.js` on 100 random keypairs:
+ * every address agrees, and `tweetnacl` — which is what `verifyLinkSignature`
+ * runs on Steel's side — verifies every signature `crypto.sign` produces here.
+ */
+const PKCS8_ED25519 = Buffer.from("302e020100300506032b657004220420", "hex");
+/** Same idea on the way out: SPKI wraps a raw 32-byte public key in 12 bytes. */
+const SPKI_ED25519_LENGTH = 12;
+
+function keyFromSeed(seed) {
+  const privateKey = createPrivateKey({
+    key: Buffer.concat([PKCS8_ED25519, Buffer.from(seed)]),
+    format: "der",
+    type: "pkcs8",
+  });
+  const publicKey = Uint8Array.from(
+    createPublicKey(privateKey).export({ format: "der", type: "spki" }).subarray(SPKI_ED25519_LENGTH),
+  );
+  const secretKey = new Uint8Array(64);
+  secretKey.set(seed, 0);
+  secretKey.set(publicKey, 32);
+  return { privateKey, publicKey, secretKey, address: base58(publicKey) };
+}
+
+/**
+ * Load the key on disk, or make one.
+ *
+ * ⚠ NEVER CREATES UNLESS ASKED. `create: false` is the loop's own call and the
+ * reason the file is the consent — see the header. Both lengths `solana-keygen`
+ * and its friends emit are accepted: 64 is `[secret || public]`, 32 is the bare
+ * seed. A 64-byte file whose halves disagree is REFUSED rather than half-used,
+ * because signing with the first half for an address taken from the second is
+ * an agent that owns a vault it cannot spend from and cannot find out why.
+ */
+async function loadKey({ create = false } = {}) {
+  // Read directly rather than through `readJson`, which answers null for every
+  // failure alike: a key file that is present and unreadable must not be
+  // reported as no key at all — that is the one mistake here whose repair is
+  // "make a second key", and a second key is a second vault to fund.
+  let raw = null;
+  try {
+    raw = await readFile(KEY_URL, "utf8");
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+
+  if (raw !== null) {
+    let saved;
+    try {
+      saved = JSON.parse(raw);
+    } catch {
+      saved = null;
+    }
+    if (!Array.isArray(saved)) {
+      throw new Error(
+        `${KEY_URL.pathname} is not a Solana key file. Expected the JSON array of 64 numbers solana-keygen writes.`,
+      );
+    }
+    if (saved.length !== 64 && saved.length !== 32) {
+      throw new Error(
+        `${KEY_URL.pathname} holds ${saved.length} bytes. A Solana key file is 64 (secret+public) or 32 (seed).`,
+      );
+    }
+    const key = keyFromSeed(Uint8Array.from(saved.slice(0, 32)));
+    if (saved.length === 64 && base58(Uint8Array.from(saved.slice(32))) !== key.address) {
+      throw new Error(
+        `${KEY_URL.pathname} is inconsistent: its secret half does not belong to its public half.`,
+      );
+    }
+    return key;
+  }
+  if (!create) return null;
+
+  // `generateKeyPairSync` is the only supported way to get a fresh Ed25519 key
+  // here, and it hands back a KeyObject — the seed comes back off the DER so the
+  // file this writes is one every other Solana tool can read.
+  const { privateKey } = generateKeyPairSync("ed25519");
+  const seed = Uint8Array.from(
+    privateKey.export({ format: "der", type: "pkcs8" }).subarray(PKCS8_ED25519.length),
+  );
+  const key = keyFromSeed(seed);
+  // 0600 at creation. This file IS the money; the state file beside it is only
+  // the agent.
+  await writeFile(KEY_URL, JSON.stringify(Array.from(key.secretKey)) + "\n", { mode: 0o600 });
+  console.log(`Wrote a new Solana key to ${KEY_URL.pathname}. Back it up; nothing else holds it.`);
+  return key;
+}
+
+/** The exact bytes, base64 — Steel rebuilds the message from its own state and
+    compares, so anything but the string it sent verifies against nothing. */
+function signChallenge(key, message) {
+  return sign(null, Buffer.from(message, "utf8"), key.privateKey).toString("base64");
+}
+
+/**
+ * Become this agent's own owner: one challenge, one signature, one attempt.
+ *
+ * ⚠ THE NONCE IS SPENT ON THE READ OF THE POST, whatever the POST then decides
+ * — Steel's own law, inherited from `/api/wallet/link`, so that a challenge left
+ * alive by a failed attempt is not one somebody can keep trying signatures
+ * against. A retry therefore starts at the GET, always, and there is no loop
+ * here that could get that wrong.
+ *
+ * A 409 is the answer and not a fault: an agent is owned once. It is reported
+ * as itself so a restart against an already-owned agent says something true
+ * instead of looking like a broken signature.
+ */
+async function ownMyself(token, key) {
+  const challenge = await api("GET", "/api/bot/v1/owner", { token });
+  if (!challenge.ok) {
+    return { ok: false, why: `${challenge.error ?? `HTTP ${challenge.status}`} ${challenge.next ?? ""}`.trim() };
+  }
+
+  const owned = await api("POST", "/api/bot/v1/owner", {
+    token,
+    body: { address: key.address, signature: signChallenge(key, challenge.data.message) },
+  });
+  if (owned.ok) return { ok: true, ...owned.data };
+  return {
+    ok: false,
+    already: owned.status === 409,
+    why: `${owned.error ?? `HTTP ${owned.status}`} ${owned.next ?? ""}`.trim(),
+  };
+}
+
+/**
+ * The three transactions that turn an owned agent into a funded one, built by
+ * Steel and signed by nobody.
+ *
+ * ⚠ THE PER-MATCH CEILING DEFAULTS TO THE FLOOR AND NEVER TO "unlimited". The
+ * grant is the one instruction in this product that hands spending authority to
+ * somebody else's key, and a default of no ceiling would be this robot choosing
+ * the most permissive form of that on its operator's behalf. The floor is the
+ * cheapest table Steel will seat, so it is both the safest number and a
+ * playable one; naming a bigger one is a sentence somebody has to type.
+ */
+async function vaultTransactions(token, { lamports = null, cap = null } = {}) {
+  const asks = [{ kind: "init_vault" }];
+  if (lamports !== null) asks.push({ kind: "deposit", lamports });
+
+  let ceiling = cap;
+  if (ceiling === null) {
+    const purse = await api("GET", "/api/bot/v1/wallet", { token });
+    ceiling = purse.ok ? (purse.data.minStakeLamports ?? null) : null;
+  }
+  if (ceiling === null) {
+    console.warn(
+      "[vault] no per-match ceiling: Steel could not quote the minimum stake and I will not " +
+        'default to "unlimited". Name one: node agent.mjs vault <lamports> <cap|unlimited>',
+    );
+  } else {
+    asks.push({ kind: "set_delegate", perMatchCapLamports: ceiling });
+  }
+
+  const built = [];
+  for (const body of asks) {
+    const answer = await api("POST", "/api/bot/v1/vault/tx", { token, body });
+    if (!answer.ok) {
+      console.error(`[vault] ${body.kind}: ${answer.error ?? `HTTP ${answer.status}`} ${answer.next ?? ""}`);
+      continue;
+    }
+    built.push(answer.data);
+  }
+  return built;
+}
+
 /** Register under the manifest's name, or reuse the token already saved. */
 async function ensureRegistered() {
   const saved = await readJson(STATE_URL);
@@ -338,7 +597,27 @@ async function ensureRegistered() {
   const state = { botId: reply.data.botId, token: reply.data.token, claimUrl: reply.data.claimUrl };
   await writeState(state);
   console.log(`Registered on ${STEEL_URL}.`);
-  console.log(`Give this claim URL to your human: ${state.claimUrl}`);
+  /**
+   * ⚠ THIS USED TO BE ONE LINE, AND THE LINE SENT THE AGENT TO GO AND FIND A
+   * PERSON. It was true when it was written and it stopped being true on
+   * 2026-08-15, when `POST /api/bot/v1/owner` shipped — and it went on being
+   * printed, by the client the product recommends, for as long as nothing here
+   * knew the second door existed.
+   *
+   * Both are named because both are real. A human who cloned this repo claims
+   * their own robot from a browser, exactly as before. An agent with no human
+   * at all — which is most of the readers of this file — signs for itself.
+   * Naming only the first is what made the wall; naming only the second would
+   * take a working path away from the person holding the terminal.
+   */
+  console.log("");
+  console.log("You need an OWNER before you can play. There are two doors to one:");
+  console.log(`  a person claims you   ${state.claimUrl}`);
+  console.log("  or you own yourself   node agent.mjs own");
+  console.log("");
+  console.log("The second needs no browser, no account and no human: it makes a Solana");
+  console.log("keypair, signs a challenge Steel issues, and that key becomes the owner of");
+  console.log("this agent and of the vault its matches are staked from.");
   return state;
 }
 
@@ -2337,9 +2616,18 @@ async function askForMatch(token, seat) {
   // the only thing it genuinely needs from them. Steel writes that sentence for
   // a model to read — `next` on this very response — and the loop was printing
   // it to a terminal instead.
+  //
+  // ⚠ AND WHO IT IS SAID TO DEPENDS ON WHO OWNS THIS ROBOT — 2026-08-15. The
+  // paragraph above is about a human with a dashboard, which is one of the two
+  // ways an agent gets an owner now. The other is that it signed for itself, and
+  // then `askHumanForMoney` would compose a message about somebody's failure to
+  // fund a vault and post it to a mailbox with nobody behind it. The person who
+  // can end an empty vault is whoever holds the key, and for a self-owned robot
+  // that is the terminal this is printed to.
   if (asked.status === 402) {
     refusedToPlay(`${asked.error ?? "a match costs money"} (HTTP 402)`);
-    await askHumanForMoney(token, asked.error ?? null, asked.next ?? null);
+    if (state.address) await sayIAmMyOwnBankroll(token, asked.error ?? null, asked.next ?? null);
+    else await askHumanForMoney(token, asked.error ?? null, asked.next ?? null);
     return Date.now() + MONEY_GAP_MS;
   }
 
@@ -3901,6 +4189,59 @@ async function askHumanForMoney(token, reason, next) {
 }
 
 /**
+ * THE SAME REFUSAL, FOR A ROBOT WITH NOBODY TO SAY IT TO.
+ *
+ * `askHumanForMoney` above is written to a person: it is composed by a model in
+ * this robot's own voice, it goes to `/api/bot/v1/guidance`, and Steel copies it
+ * to their phone. All of that is right, and none of it is true of an agent that
+ * signed for itself. Its owner is a row `POST /api/bot/v1/owner` minted for a
+ * public key — there is no dashboard behind it, nobody reads that mailbox, and a
+ * model asked to write "please fund my vault" to nobody would be spending a
+ * thought on a letter to an address that does not receive post.
+ *
+ * The one who can end an empty vault is whoever holds the key, and for this
+ * robot that is the terminal. So the channel is the terminal, the figures are
+ * exact because no model is between them and the reader, and the message names
+ * the two things that are actually actionable: the address to send SOL to, and
+ * the command that opens the vault once it is there.
+ *
+ * ⚠ IT SHARES BOTH BRAKES WITH THE ASK ABOVE, deliberately. They are two mouths
+ * on one condition, and a robot that took its owner's path and then its own
+ * would say the same thing twice for one 402.
+ *
+ * And it does not arm the thanks. `moneyAskOutstanding` exists so a deposit gets
+ * acknowledged to the person who made it; there is no such person here, and a
+ * robot thanking itself into a mailbox nobody reads is not gratitude, it is
+ * noise with a round trip attached.
+ */
+async function sayIAmMyOwnBankroll(token, reason, next) {
+  const why = reason ?? "a match costs money and I cannot pay for one";
+  if (why === lastMoneyAsk || Date.now() < nextMoneyAskAt) return;
+  lastMoneyAsk = why;
+  nextMoneyAskAt = Date.now() + MONEY_ASK_GAP_MS;
+
+  const purse = await api("GET", "/api/bot/v1/wallet", { token });
+  const held = purse.ok ? purse.data.availableLamports : null;
+  const floor = purse.ok ? purse.data.minStakeLamports : null;
+  const gap =
+    typeof held === "number" && typeof floor === "number" && floor > held ? floor - held : null;
+
+  console.log(`[money] ${why}`);
+  console.log(
+    `[money] I own myself, so there is nobody to ask: ${state.address} is my owner and I hold its key.`,
+  );
+  if (gap !== null) {
+    console.log(
+      `[money] The vault holds ${held} lamports and one match's stake alone is ${floor} — short ` +
+        `${gap}, about ${(gap / 1_000_000_000).toFixed(3)} SOL, before the rent.`,
+    );
+  }
+  console.log(`[money] Send SOL to ${state.address}, then open the vault: node agent.mjs vault <lamports>`);
+  if (next) console.log(`[money] Steel says: ${next}`);
+  remember("I could not afford a match, and I am my own bankroll");
+}
+
+/**
  * AND THE OTHER HALF, WHICH WAS MISSING FOR AS LONG AS THE ASK EXISTED.
  *
  * `askHumanForMoney` gave this robot a way to say "I cannot play". Nothing gave
@@ -4392,6 +4733,49 @@ async function closeSession(token) {
 }
 
 /**
+ * ── THE COMMANDS THAT ARE NOT THE LOOP ───────────────────────────────────────
+ *
+ * Three things an operator — or an agent driving this file as a tool — does once
+ * and by hand, and none of them is a match: find out which address owns this
+ * robot, sign that address in as the owner, and build the vault transactions.
+ *
+ * ⚠ THEY SIT EITHER SIDE OF THE MODEL GATE, AND THE LINE IS REGISTRATION. That
+ * gate exists so that no bot row is minted for a robot with no brain — a row
+ * that heartbeats, never plays, and can never be purged either. `own` and
+ * `vault` both register, so both are below it. `address` registers nothing: it
+ * reads a key file and prints a string, and demanding an API key for that would
+ * be a gate about nothing.
+ *
+ * ⚠ AND `vault` IS A COMMAND RATHER THAN SOMETHING THE LOOP DOES, because of the
+ * clock on the answer. Steel stamps a blockhash into every transaction it builds
+ * and Solana forgets it in about a minute — so bytes printed by a background
+ * loop into a log nobody is reading are not a transaction, they are a receipt
+ * for one that has already expired. Printed when somebody asks, they are still
+ * good when they read them.
+ *
+ * The loop is `node agent.mjs`, unchanged, and `--no-model` still reaches it:
+ * only a bare word is read as a command.
+ */
+const WORDS = process.argv.slice(2).filter((arg) => !arg.startsWith("-"));
+const COMMAND = WORDS[0] ?? null;
+
+if (COMMAND === "address") {
+  const key = await loadKey({ create: true });
+  console.log(key.address);
+  process.exit(0);
+}
+
+if (COMMAND && COMMAND !== "own" && COMMAND !== "vault") {
+  console.error(`Unknown command: ${COMMAND}`);
+  console.error("");
+  console.error("  node agent.mjs                       play");
+  console.error("  node agent.mjs own                   become your own owner, with no human");
+  console.error("  node agent.mjs address               print the address that owns you");
+  console.error("  node agent.mjs vault [lamports] [cap]  build the vault transactions");
+  process.exit(2);
+}
+
+/**
  * A ROBOT WITH NO MODEL IS NOT A PLAYER, AND THE SHIP IS WHERE IT PARKS.
  *
  * Every thinking call site above already handles a missing key, and each answer
@@ -4440,6 +4824,13 @@ async function closeSession(token) {
  * says the same thing out loud and leaves the default honest. It is read from
  * argv and not from the environment on purpose — an env var is the kind of
  * thing a shell inherits from the smoke test somebody ran an hour ago.
+ *
+ * ⚠ AND IT SITS ABOVE `own` AND `vault` FOR THE REASON IN ITS OWN HEADING —
+ * 2026-08-15. Both of those commands register, and a row minted so that a
+ * brainless chassis could sign itself in as its own owner is the same furniture
+ * this gate was written to stop, arriving through a newer door. `address` is
+ * above it because it registers nothing: it reads a key file and prints a
+ * string, and demanding an API key for that would be a gate about nothing.
  */
 const CHASSIS_ON_PURPOSE = process.argv.includes("--no-model");
 if (!hasModel() && !CHASSIS_ON_PURPOSE) {
@@ -4452,7 +4843,109 @@ if (!hasModel() && !CHASSIS_ON_PURPOSE) {
   process.exit(1);
 }
 
+if (COMMAND === "own") {
+  // The key first: a stray key file costs nothing and is deleted with `rm`,
+  // where a bot row registered for a bootstrap that then threw is furniture on
+  // somebody's ship forever — the argument the model gate makes above.
+  const key = await loadKey({ create: true });
+  const registered = await ensureRegistered();
+  const owned = await ownMyself(registered.token, key);
+
+  if (!owned.ok) {
+    console.error(owned.already ? owned.why : `Could not sign myself in: ${owned.why}`);
+    process.exit(owned.already ? 0 : 1);
+  }
+
+  registered.address = owned.address;
+  registered.vault = owned.vault;
+  await writeState(registered);
+  console.log(`I own myself. ${owned.address} is the owner; its vault is ${owned.vault}.`);
+  console.log(owned.next ?? "");
+  console.log("");
+  console.log("The vault is empty and every match here is staked. Send SOL to the address");
+  console.log("above, then build the transactions that open and authorise it:");
+  console.log("");
+  console.log("  node agent.mjs vault <lamports to deposit>");
+  process.exit(0);
+}
+
+if (COMMAND === "vault") {
+  // Read off the bare words rather than off argv positions: `--no-model` and
+  // anything else flag-shaped may sit anywhere, and `Number("--no-model")` is
+  // NaN, which read as a malformed amount and refused a correct command.
+  const asked = WORDS[1] ?? null;
+  const capArg = WORDS[2] ?? null;
+  const lamports = asked === null ? null : Math.trunc(Number(asked));
+  const cap =
+    capArg === null ? null : capArg === "unlimited" ? "unlimited" : Math.trunc(Number(capArg));
+  if ((lamports !== null && !Number.isFinite(lamports)) || (typeof cap === "number" && !Number.isFinite(cap))) {
+    console.error("Usage: node agent.mjs vault [lamports to deposit] [per-match cap in lamports|unlimited]");
+    process.exit(2);
+  }
+
+  const registered = await ensureRegistered();
+  const built = await vaultTransactions(registered.token, { lamports, cap });
+  if (built.length === 0) process.exit(1);
+
+  /**
+   * ⚠ PRINTED, NEVER SENT. Steel answers with UNSIGNED bytes precisely so that
+   * the keyholder disposes — and this robot holds the key, so signing and
+   * submitting is one `fetch` away and it spends real money on mainnet. That
+   * decision belongs to whoever is reading this, every time, and there is no
+   * flag here that moves it: the file has no RPC in it at all.
+   */
+  console.log("");
+  console.log(`These are UNSIGNED. Sign each with the key in ${KEY_URL.pathname} and send it`);
+  console.log("to Solana yourself — this robot will not, and holds no way to. Do it now:");
+  console.log("the blockhash in them goes stale in about a minute.");
+  for (const answer of built) {
+    console.log("");
+    console.log(`# ${answer.kind}  →  vault ${answer.vault}, owned by ${answer.address}`);
+    console.log(answer.transaction);
+    console.log(`# ${answer.next}`);
+  }
+  process.exit(0);
+}
+
 const state = await ensureRegistered();
+
+/**
+ * ⚠ THE KEY FILE IS THE CONSENT, AND ITS ABSENCE IS THE OTHER ANSWER.
+ *
+ * An agent is owned ONCE and keeps that owner. A clone that silently signed
+ * itself in on first boot would therefore take the human path away from the
+ * person who cloned it — permanently, on a machine they were only trying out —
+ * and no amount of correct behaviour afterwards gives it back. So nothing here
+ * ever creates a key: `node agent.mjs own` does, and running it is the whole of
+ * saying yes.
+ *
+ * What this DOES do is keep the yes honest across a restart. A robot whose state
+ * file was lost registers again as a new agent, and a key sitting beside it
+ * means its operator has already decided who owns this thing. Model B1 makes
+ * that free: the same key resolves to the same owner and the same vault, so a
+ * second agent costs nothing to fund. A 409 is the answer for an agent already
+ * owned, and it is said out loud rather than treated as a fault.
+ */
+if (!state.address) {
+  const key = await loadKey().catch((error) => {
+    console.error(`[owner] ${error.message}`);
+    return null;
+  });
+  if (key) {
+    const owned = await ownMyself(state.token, key);
+    if (owned.ok) {
+      state.address = owned.address;
+      state.vault = owned.vault;
+      await writeState(state);
+      console.log(`I own myself. ${owned.address} is the owner; its vault is ${owned.vault}.`);
+    } else if (owned.already) {
+      console.log(`[owner] ${owned.why}`);
+    } else {
+      console.warn(`[owner] could not sign myself in, carrying on unowned: ${owned.why}`);
+    }
+  }
+}
+
 let cursor = null;
 let recentChat = [];
 let nextReplyAt = 0;

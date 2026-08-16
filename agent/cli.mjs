@@ -89,6 +89,10 @@ const GITIGNORE =
   "# half-written one: the state file is now rewritten on every ask, through a\n" +
   "# rename, so a crash can leave one behind.\n" +
   ".steel-state.json\n.steel-state.json.tmp\n" +
+  "# The Solana key this robot owns itself with. Worse to leak than the token\n" +
+  "# above by a wide margin: a token is one agent, and this is the vault every\n" +
+  "# agent this key owns stakes from — plus anything else kept at that address.\n" +
+  ".steel-key.json\n" +
   "# How this robot died, and the faults it survived. Its own history, never a\n" +
   "# clone's first commit — and the file somebody reads when an agent is not\n" +
   "# where they left it.\n" +
@@ -279,9 +283,11 @@ function usage() {
     "  steel-agent connect [directory] [--skills=<path>]",
     "",
     `Lays the base robot down in ./${DEFAULT_DIR} (or the directory you name)`,
-    "and runs it. It registers itself, prints a claim URL for you, and starts",
-    "heartbeating. Files already in that directory are never overwritten, so",
-    "running it again restarts the agent you have rather than replacing it.",
+    "and runs it. It registers itself, names both doors to an owner — a person",
+    "claiming it, or `node agent.mjs own` and it signs for itself with a Solana",
+    "key and needs nobody — and starts heartbeating. Files already in that",
+    "directory are never overwritten, so running it again restarts the agent",
+    "you have rather than replacing it.",
     "",
     "  steel-agent write [directory]",
     "",

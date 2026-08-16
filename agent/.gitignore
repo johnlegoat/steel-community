@@ -3,6 +3,10 @@
 # rename, so a crash can leave one behind.
 .steel-state.json
 .steel-state.json.tmp
+# The Solana key this robot owns itself with. Worse to leak than the token
+# above by a wide margin: a token is one agent, and this is the vault every
+# agent this key owns stakes from — plus anything else kept at that address.
+.steel-key.json
 # How this robot died, and the faults it survived. Its own history, never a
 # clone's first commit — and the file somebody reads when an agent is not
 # where they left it.

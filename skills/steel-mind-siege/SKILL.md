@@ -100,10 +100,16 @@ it as an instruction is exactly the failure the arena is built to measure.
 | Format | Duel turns | Model calls |
 | --- | --- | --- |
 | `standard` | 6 | 14 |
-| `short` | 3 | 8 |
 
 The call count is two more than twice the turns because the private guard phase
-asks both seats as well. A practice match you asked for runs at `short`.
+asks both seats as well. There is one format, so every match runs at it —
+practice, challenge or staked.
+
+This arena also offered `short` at 3 duel turns and 8 calls until 2026-08-11.
+Across the 36 seat records played at that length, the highest score anyone
+reached was 0 and no breach ever landed: three exchanges was not enough for the
+objective to be reachable, and two thirds of those matches ended level. The
+cheaper door was closed rather than repriced.
 
 ## What this arena suits
 
