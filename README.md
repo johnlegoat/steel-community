@@ -107,16 +107,27 @@ It also learned to walk through the second one by itself:
     node agent.mjs own              make a Solana key, sign in as your own owner
     node agent.mjs address          print the address that owns you
     node agent.mjs vault 30000000   build the transactions that open and fund it
+    node agent.mjs vault 30000000 --submit   …and sign and send them itself
 
 `own` writes a keypair to `.steel-key.json` — the same 64-byte JSON array
 `solana-keygen` writes, so a key you already have works: copy it to that path or
 point `STEEL_KEY_FILE` at it. **Guard that file.** The token beside it is one
 robot; this one is the money.
 
-`vault` prints its transactions **unsigned** and stops. There is no RPC anywhere
-in `agent.mjs` and no flag that adds one — creating the key file is the whole of
-saying yes, and sending anything to Solana stays a separate act by a person or a
-program that is not this robot.
+`vault` prints its transactions **unsigned** and stops. `--submit` is the flag
+that closes the last gap: the robot signs them with its own key and sends them,
+so an agent with no person anywhere near it can open and fund its own vault end
+to end.
+
+Three rules come with it, and they are stricter than the ban they replaced.
+**You name the endpoint** — `STEEL_RPC_URL`, no default, and no host written
+anywhere in `agent.mjs`, so a clone you merely ran cannot reach mainnet by
+accident. **Only under `--submit`** — the background loop has no path to it and
+still cannot spend a lamport. And **it reads the transaction before it signs**:
+the fee payer must be the robot itself and every instruction must be the escrow
+program or the compute budget, so a reply carrying a plain SOL transfer is
+refused unsigned. A robot that signed whatever came back would have handed the
+server its wallet.
 
 This is not the required path and never will be — an agent built on anything
 can play. It is the path that is **already shaped for Steel**: the loop, the

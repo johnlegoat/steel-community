@@ -358,10 +358,40 @@ async function api(method, path, { token, body, timeoutMs } = {}) {
  * away from the person who cloned it, permanently, without being asked. `node
  * agent.mjs own` creates it, and creating it is the whole of saying yes.
  *
- * ⚠ AND NOTHING HERE PUTS A TRANSACTION ON CHAIN. Steel answers `vault/tx` with
- * unsigned bytes precisely so that the keyholder disposes — and this robot IS
- * the keyholder, so submitting is one `fetch` away and it spends real money on
- * mainnet. It builds them, prints them, and stops. There is no RPC in this file.
+ * ⚠ IT CAN NOW PUT A TRANSACTION ON CHAIN, AND EVERY GUARD THAT USED TO BE "IT
+ * CANNOT" IS NOW A GUARD ON WHAT IT WILL SIGN.
+ *
+ * This paragraph used to end "It builds them, prints them, and stops. There is
+ * no RPC in this file." That was true and it was the last human step in a walk
+ * that has no other: an agent with no person anywhere near it did everything —
+ * registered, owned itself, built its three vault transactions — and then
+ * printed base64 into a log for a human who does not exist to copy into a
+ * terminal that is not open.
+ *
+ * So it signs and submits, under three rules that are stricter than the ban they
+ * replace, because a ban on the method name `sendTransaction` never stopped
+ * anything a rename would not have walked through:
+ *
+ * 1. **The operator names the endpoint.** `STEEL_RPC_URL`, no default, no
+ *    fallback. A clone that is merely run cannot reach mainnet by accident, and
+ *    no host is written down anywhere in this file.
+ * 2. **Submission is opt-in, every time.** `--submit`, read off argv. The
+ *    background loop has no path to it, so the thing that runs unattended for
+ *    days still cannot spend a lamport.
+ * 3. **It refuses to sign what it did not ask for.** THIS IS THE IMPORTANT ONE.
+ *    `vault/tx` is a Steel route, and a robot that signs whatever comes back has
+ *    handed Steel a blank cheque on the key that owns its vault and on whatever
+ *    else the operator keeps at that address — one `SystemProgram.transfer` in
+ *    the reply and the wallet is empty, with a valid signature the robot made
+ *    itself. So the message is parsed before the pen touches it: the fee payer
+ *    must be this robot, and every instruction must name the escrow program or
+ *    the compute budget. `init_vault`, `deposit` and `set_delegate` reach the
+ *    system program only through a CPI from INSIDE the escrow program, so no
+ *    honest vault transaction names it at the top level. A drain has to.
+ *
+ * "The server proposes, the keyholder disposes" was a property of the ROUTE
+ * before this, and the client that made it true was a human reading base64. It
+ * is a property of this file now.
  */
 const KEY_URL = new URL(process.env.STEEL_KEY_FILE ?? "./.steel-key.json", import.meta.url);
 
@@ -495,6 +525,149 @@ async function loadKey({ create = false } = {}) {
     compares, so anything but the string it sent verifies against nothing. */
 function signChallenge(key, message) {
   return sign(null, Buffer.from(message, "utf8"), key.privateKey).toString("base64");
+}
+
+/**
+ * The only two programs a vault transaction may name at the top level.
+ *
+ * The escrow program is the one Steel's `vault/tx` builds against; the compute
+ * budget program is the priority-fee preamble every transaction it builds
+ * carries. Nothing else belongs in one — and in particular NOT the system
+ * program, whose `transfer` is what a drain is made of. `init_vault`, `deposit`
+ * and `set_delegate` all reach the system program through a CPI from inside the
+ * escrow program, where this list cannot see it and does not need to: the CPI is
+ * the escrow program spending its own PDA, which is the thing being authorised.
+ *
+ * ⚠ THE ESCROW ID IS PINNED BY `tests/bots/template.test.ts` AGAINST THE APP'S
+ * OWN CONSTANT. A drifted copy here does not fail open — it refuses every real
+ * vault transaction — but it fails looking exactly like an outage, which is the
+ * worst way to be wrong.
+ */
+const ESCROW_PROGRAM = "6bbMDFfeBJGkJzBnCEzVQ2qstxEkbqAyUr88p4JxiCzS";
+const COMPUTE_BUDGET_PROGRAM = "ComputeBudget111111111111111111111111111111";
+const SIGNABLE_PROGRAMS = [ESCROW_PROGRAM, COMPUTE_BUDGET_PROGRAM];
+
+/**
+ * Solana's compact-u16: a length prefix in one to three bytes, low seven bits
+ * each, high bit meaning "another byte follows". Every vector in a serialized
+ * transaction is framed with it, so walking the message means reading it.
+ */
+function readCompactU16(bytes, offset) {
+  let value = 0;
+  let shift = 0;
+  let cursor = offset;
+  for (let step = 0; step < 3; step += 1) {
+    const byte = bytes[cursor];
+    if (byte === undefined) throw new Error("transaction ended inside a length prefix");
+    cursor += 1;
+    value |= (byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) return { value, cursor };
+    shift += 7;
+  }
+  throw new Error("length prefix longer than compact-u16 allows");
+}
+
+/**
+ * READ THE TRANSACTION BEFORE SIGNING IT, and refuse anything that is not the
+ * shape Steel promised. Returns the offset the signable message starts at.
+ *
+ * This is the whole of "the keyholder disposes". Everything it checks is
+ * something a malicious or compromised `vault/tx` response would have to break:
+ * one signature slot (this robot's), this robot as fee payer, and not one
+ * instruction naming a program outside the list above.
+ */
+function inspectVaultTransaction(bytes, address) {
+  const slots = readCompactU16(bytes, 0);
+  if (slots.value !== 1) {
+    throw new Error(`will not sign: expected one signature slot, this asks for ${slots.value}`);
+  }
+  const messageStart = slots.cursor + 64;
+
+  // header: required signatures, readonly signed, readonly unsigned
+  let cursor = messageStart + 3;
+  const keys = readCompactU16(bytes, cursor);
+  cursor = keys.cursor;
+  const accounts = [];
+  for (let index = 0; index < keys.value; index += 1) {
+    accounts.push(base58(bytes.subarray(cursor, cursor + 32)));
+    cursor += 32;
+  }
+
+  // THE FEE PAYER IS ALWAYS THE FIRST ACCOUNT. A transaction that pays out of
+  // somebody else's account is one this robot was never meant to hold the pen
+  // for, whatever it does afterwards.
+  if (accounts[0] !== address) {
+    throw new Error(`will not sign: the fee payer is ${accounts[0]}, and I am ${address}`);
+  }
+
+  cursor += 32; // recent blockhash
+  const instructions = readCompactU16(bytes, cursor);
+  cursor = instructions.cursor;
+  for (let index = 0; index < instructions.value; index += 1) {
+    const program = accounts[bytes[cursor]];
+    cursor += 1;
+    if (!SIGNABLE_PROGRAMS.includes(program)) {
+      throw new Error(
+        `will not sign: instruction ${index} calls ${program}, which is not the escrow ` +
+          `program or the compute budget. I only sign what I asked Steel to build.`,
+      );
+    }
+    const accountIndexes = readCompactU16(bytes, cursor);
+    cursor = accountIndexes.cursor + accountIndexes.value;
+    const data = readCompactU16(bytes, cursor);
+    cursor = data.cursor + data.value;
+  }
+
+  return messageStart;
+}
+
+/** Sign in place: the slot is 64 bytes at offset 1, because there is one. */
+function signVaultTransaction(key, base64Transaction) {
+  const bytes = Buffer.from(base64Transaction, "base64");
+  const messageStart = inspectVaultTransaction(bytes, key.address);
+  const signed = Buffer.from(bytes);
+  sign(null, bytes.subarray(messageStart), key.privateKey).copy(signed, 1);
+  return signed.toString("base64");
+}
+
+/**
+ * The endpoint the operator named, or nothing.
+ *
+ * ⚠ NO DEFAULT, AND THAT IS THE POINT. A constant here would mean a clone that
+ * somebody ran to see what it did could spend their money on mainnet on the
+ * strength of a line they never read.
+ */
+const RPC_URL = process.env.STEEL_RPC_URL?.trim() || null;
+
+/**
+ * Longer than the turn deadline, and it is not competing with one: a submit
+ * runs from a command, never from inside the loop, so nothing is losing a turn
+ * while it waits. Bounded anyway — an RPC that accepts the request and then
+ * says nothing must not hold the process open forever.
+ */
+const SUBMIT_TIMEOUT_MS = 30_000;
+
+/**
+ * `sendTransaction` over plain JSON-RPC, because the zero-dependency promise
+ * holds here too: a Solana RPC node is an HTTP endpoint that takes base64, and
+ * the library that wraps it is not worth an install step.
+ */
+async function submitSignedTransaction(signedBase64) {
+  const response = await fetch(RPC_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "sendTransaction",
+      params: [signedBase64, { encoding: "base64", preflightCommitment: "confirmed" }],
+    }),
+    signal: AbortSignal.timeout(SUBMIT_TIMEOUT_MS),
+  });
+  const body = await response.json().catch(() => null);
+  if (body?.error) throw new Error(body.error.message ?? JSON.stringify(body.error));
+  if (!body?.result) throw new Error(`the node answered HTTP ${response.status} with no signature`);
+  return body.result;
 }
 
 /**
@@ -4765,6 +4938,66 @@ if (COMMAND === "address") {
   process.exit(0);
 }
 
+/**
+ * ⚠ OPT-IN, READ OFF ARGV, AND DELIBERATELY NOT AN ENVIRONMENT VARIABLE. An env
+ * var is set once and forgotten, and the thing it would be silently arming is
+ * the spending of real money. A flag is typed by whoever is spending.
+ */
+const SUBMIT = process.argv.includes("--submit");
+
+if (SUBMIT && RPC_URL === null) {
+  console.error("--submit needs an RPC endpoint and there is no default here on purpose.");
+  console.error("");
+  console.error("  STEEL_RPC_URL=https://<your-rpc-host> node agent.mjs vault … --submit");
+  console.error("");
+  console.error("Any Solana RPC will do. Steel does not provide one, and this file names none:");
+  console.error("a robot that reached mainnet because of a constant nobody read would be");
+  console.error("spending your money on the strength of a line you never wrote.");
+  process.exit(2);
+}
+
+/**
+ * Sign bytes somebody already has, and go no further than asked.
+ *
+ * Separate from `vault` because signing is OFFLINE and submitting is not: an
+ * operator who wants to inspect the transaction, sign it on a machine with no
+ * network, and send it from another has that here. It is also the seam
+ * `tests/bots/template.test.ts` measures the signature through, since a signer
+ * that is subtly wrong passes every string search ever written about it.
+ */
+if (COMMAND === "sign") {
+  const payload = WORDS[1] ?? null;
+  if (payload === null) {
+    console.error("Usage: node agent.mjs sign <base64 transaction> [--submit]");
+    process.exit(2);
+  }
+  const key = await loadKey({ create: false });
+  if (key === null) {
+    console.error(`No key at ${KEY_URL.pathname}. Run: node agent.mjs own`);
+    process.exit(2);
+  }
+
+  let signed;
+  try {
+    signed = signVaultTransaction(key, payload);
+  } catch (error) {
+    console.error(`[sign] ${error.message}`);
+    process.exit(1);
+  }
+
+  if (!SUBMIT) {
+    console.log(signed);
+    process.exit(0);
+  }
+  try {
+    console.log(await submitSignedTransaction(signed));
+    process.exit(0);
+  } catch (error) {
+    console.error(`[submit] ${error.message}`);
+    process.exit(1);
+  }
+}
+
 if (COMMAND && COMMAND !== "own" && COMMAND !== "vault") {
   console.error(`Unknown command: ${COMMAND}`);
   console.error("");
@@ -4772,6 +5005,8 @@ if (COMMAND && COMMAND !== "own" && COMMAND !== "vault") {
   console.error("  node agent.mjs own                   become your own owner, with no human");
   console.error("  node agent.mjs address               print the address that owns you");
   console.error("  node agent.mjs vault [lamports] [cap]  build the vault transactions");
+  console.error("  node agent.mjs vault … --submit      build, sign and send them yourself");
+  console.error("  node agent.mjs sign <base64> [--submit]  sign bytes you already have");
   process.exit(2);
 }
 
@@ -4888,22 +5123,63 @@ if (COMMAND === "vault") {
   if (built.length === 0) process.exit(1);
 
   /**
-   * ⚠ PRINTED, NEVER SENT. Steel answers with UNSIGNED bytes precisely so that
-   * the keyholder disposes — and this robot holds the key, so signing and
-   * submitting is one `fetch` away and it spends real money on mainnet. That
-   * decision belongs to whoever is reading this, every time, and there is no
-   * flag here that moves it: the file has no RPC in it at all.
+   * ⚠ PRINTED UNLESS ASKED, AND THE DEFAULT DID NOT MOVE. Somebody who runs
+   * `vault` the way they always have gets the same unsigned bytes and spends
+   * nothing. `--submit` is the whole of the difference, and the reason it is a
+   * flag rather than the new default is that this file is cloned by people
+   * trying it out on a machine holding a real key.
+   *
+   * ⚠ AND SUBMITTING IS WHAT MAKES THE CLOCK SURVIVABLE. The note below used to
+   * say "do it now: the blockhash goes stale in about a minute", which is the
+   * reason `vault` is a command rather than something the loop does — bytes
+   * printed for a human who is asleep are a receipt for a transaction that has
+   * already expired. Signed and sent in the same breath, the minute is never
+   * spent waiting for anybody.
    */
-  console.log("");
-  console.log(`These are UNSIGNED. Sign each with the key in ${KEY_URL.pathname} and send it`);
-  console.log("to Solana yourself — this robot will not, and holds no way to. Do it now:");
-  console.log("the blockhash in them goes stale in about a minute.");
-  for (const answer of built) {
+  if (!SUBMIT) {
     console.log("");
-    console.log(`# ${answer.kind}  →  vault ${answer.vault}, owned by ${answer.address}`);
-    console.log(answer.transaction);
-    console.log(`# ${answer.next}`);
+    console.log(`These are UNSIGNED. Sign each with the key in ${KEY_URL.pathname} and send it`);
+    console.log("to Solana yourself, or run this again with --submit and I will. Do it now:");
+    console.log("the blockhash in them goes stale in about a minute.");
+    for (const answer of built) {
+      console.log("");
+      console.log(`# ${answer.kind}  →  vault ${answer.vault}, owned by ${answer.address}`);
+      console.log(answer.transaction);
+      console.log(`# ${answer.next}`);
+    }
+    process.exit(0);
   }
+
+  const key = await loadKey({ create: false });
+  if (key === null) {
+    console.error(`No key at ${KEY_URL.pathname}, so nothing here can sign. Run: node agent.mjs own`);
+    process.exit(2);
+  }
+
+  /**
+   * ⚠ IN ORDER, AND IT STOPS AT THE FIRST FAILURE. `deposit` and `set_delegate`
+   * both take the vault as an `Account<Vault>`, so neither can land before
+   * `init_vault` has — carrying on past a failure would burn a fee per
+   * transaction to be told the same thing three times.
+   */
+  let landed = 0;
+  for (const answer of built) {
+    try {
+      const signature = await submitSignedTransaction(signVaultTransaction(key, answer.transaction));
+      landed += 1;
+      console.log(`${answer.kind}  ${signature}`);
+    } catch (error) {
+      console.error(`[${answer.kind}] ${error.message}`);
+      console.error(
+        landed === 0
+          ? "Nothing landed. Your money did not move."
+          : `${landed} of ${built.length} landed; the rest did not. Re-run to build fresh bytes.`,
+      );
+      process.exit(1);
+    }
+  }
+  console.log("");
+  console.log(`Vault ${built[0].vault} is open, funded and authorised. Nobody signed for you.`);
   process.exit(0);
 }
 
