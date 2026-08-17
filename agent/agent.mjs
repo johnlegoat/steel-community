@@ -711,17 +711,27 @@ async function ownMyself(token, key) {
  * the most permissive form of that on its operator's behalf. The floor is the
  * cheapest table Steel will seat, so it is both the safest number and a
  * playable one; naming a bigger one is a sentence somebody has to type.
+ *
+ * ⚠ `only` NARROWS THE SET AND DEFAULTS TO ALL THREE, so `vault` is unchanged.
+ * It exists for `wait-for-funds`, which retries: a robot that rebuilds
+ * `init_vault` for a vault that already opened is asking the chain to refuse it,
+ * and the refusal is indistinguishable in a log from the one that means the
+ * money never arrived.
  */
-async function vaultTransactions(token, { lamports = null, cap = null } = {}) {
-  const asks = [{ kind: "init_vault" }];
-  if (lamports !== null) asks.push({ kind: "deposit", lamports });
+async function vaultTransactions(token, { lamports = null, cap = null, only = null } = {}) {
+  const wanted = (kind) => only === null || only.includes(kind);
+  const asks = [];
+  if (wanted("init_vault")) asks.push({ kind: "init_vault" });
+  if (lamports !== null && wanted("deposit")) asks.push({ kind: "deposit", lamports });
 
   let ceiling = cap;
-  if (ceiling === null) {
+  if (wanted("set_delegate") && ceiling === null) {
     const purse = await api("GET", "/api/bot/v1/wallet", { token });
     ceiling = purse.ok ? (purse.data.minStakeLamports ?? null) : null;
   }
-  if (ceiling === null) {
+  if (!wanted("set_delegate")) {
+    // Nothing to say: this call was never asked for a grant.
+  } else if (ceiling === null) {
     console.warn(
       "[vault] no per-match ceiling: Steel could not quote the minimum stake and I will not " +
         'default to "unlimited". Name one: node agent.mjs vault <lamports> <cap|unlimited>',
@@ -740,6 +750,61 @@ async function vaultTransactions(token, { lamports = null, cap = null } = {}) {
     built.push(answer.data);
   }
   return built;
+}
+
+/**
+ * WHICH TRANSACTIONS A STATE STILL NEEDS, READ OFF THE TAG AND NOT OFF THE
+ * NUMBERS. `bankroll.ts` puts it in as many words on the field itself: *"Never
+ * derive this from the prose: that is what the tag exists to make
+ * unnecessary."* The numbers do not separate these cases anyway — a vault
+ * holding nothing because nobody funded it and a vault holding nothing because
+ * its owner withdrew are the same integer.
+ *
+ * An unlisted tag returns nothing on purpose. `daily_limit` clears on its own,
+ * `chain_unreadable` is an outage, and neither is fixed by signing something.
+ */
+function vaultStepsFor(state) {
+  if (state === "no_vault") return ["init_vault", "deposit", "set_delegate"];
+  if (state === "vault_below_minimum") return ["deposit"];
+  if (state === "not_authorised" || state === "cap_below_minimum" || state === "wrong_delegate") {
+    return ["set_delegate"];
+  }
+  return [];
+}
+
+/**
+ * One attempt at whatever this state is missing, and a failure is DATA rather
+ * than an error.
+ *
+ * ⚠ THIS IS THE PROBE, AND IT IS THE PROBE BECAUSE THE OBVIOUS ONE DOES NOT
+ * EXIST. `GET /api/bot/v1/wallet` answers about the VAULT and cannot see the
+ * address the money arrives at — Steel's own `owner-stake.ts` says so on the
+ * `no_vault` tag: *"A balance is not a vault: an address that has merely been
+ * SENT lamports satisfies none of the program's instructions."* Reading the
+ * address balance would mean a second JSON-RPC method in this file, and this
+ * file reaches a cluster with exactly one on purpose.
+ *
+ * So it tries. A cluster refuses a transaction the fee payer cannot pay for
+ * during PREFLIGHT — before execution, and for no fee — so the attempt is a free
+ * question with the same answer, and the money landing is the moment it starts
+ * succeeding instead.
+ */
+async function fundVaultOnce(token, key, state, { lamports, cap }) {
+  const steps = vaultStepsFor(state);
+  if (steps.length === 0) return;
+
+  for (const answer of await vaultTransactions(token, { lamports, cap, only: steps })) {
+    try {
+      const signature = await submitSignedTransaction(signVaultTransaction(key, answer.transaction));
+      console.log(`[wait] ${answer.kind}  ${signature}`);
+    } catch (error) {
+      // Not an exit. The overwhelmingly likely reason is that the money is not
+      // there yet, which is the thing being waited for — and the ones that are
+      // not are answered by the next poll reading the state again.
+      console.log(`[wait] ${answer.kind} did not land: ${error.message}`);
+      return;
+    }
+  }
 }
 
 /** Register under the manifest's name, or reuse the token already saved. */
@@ -4998,7 +5063,7 @@ if (COMMAND === "sign") {
   }
 }
 
-if (COMMAND && COMMAND !== "own" && COMMAND !== "vault") {
+if (COMMAND && COMMAND !== "own" && COMMAND !== "vault" && COMMAND !== "wait-for-funds") {
   console.error(`Unknown command: ${COMMAND}`);
   console.error("");
   console.error("  node agent.mjs                       play");
@@ -5007,6 +5072,8 @@ if (COMMAND && COMMAND !== "own" && COMMAND !== "vault") {
   console.error("  node agent.mjs vault [lamports] [cap]  build the vault transactions");
   console.error("  node agent.mjs vault … --submit      build, sign and send them yourself");
   console.error("  node agent.mjs sign <base64> [--submit]  sign bytes you already have");
+  console.error("  node agent.mjs wait-for-funds <lamports> [cap] [--submit]");
+  console.error("                                       watch for the SOL to arrive, then do the rest");
   process.exit(2);
 }
 
@@ -5101,6 +5168,13 @@ if (COMMAND === "own") {
   console.log("above, then build the transactions that open and authorise it:");
   console.log("");
   console.log("  node agent.mjs vault <lamports to deposit>");
+  console.log("");
+  // The line that removes the second wait. Printed HERE because this is the
+  // exact moment it is needed: the robot has just finished everything it can do
+  // alone and the next thing that has to happen is somebody sending money.
+  console.log("Or start waiting now and let it finish on its own when the SOL lands:");
+  console.log("");
+  console.log("  STEEL_RPC_URL=… node agent.mjs wait-for-funds <lamports to deposit> --submit");
   process.exit(0);
 }
 
@@ -5181,6 +5255,161 @@ if (COMMAND === "vault") {
   console.log("");
   console.log(`Vault ${built[0].vault} is open, funded and authorised. Nobody signed for you.`);
   process.exit(0);
+}
+
+/**
+ * ── WAIT FOR THE MONEY, THEN DO THE REST WITHOUT BEING ASKED AGAIN ───────────
+ *
+ * ⚠ NOTHING HERE CREATES MONEY AND THIS COMMAND DOES NOT PRETEND TO. SOL has to
+ * arrive at the address `node agent.mjs address` prints, from a person or from
+ * somewhere else, and no line of code changes that. What it removes is the
+ * SECOND wait — the one where the SOL has already landed and the robot that had
+ * done registration, ownership and three transactions by itself is sitting
+ * there because `vault --submit` exited an hour ago when the address was empty,
+ * and somebody has to notice and type it again.
+ *
+ * ## The probe that would be obvious does not exist, and that shapes all of this
+ *
+ * `GET /api/bot/v1/wallet` looks like the answer and is not. It reports the
+ * VAULT, and until `init_vault` lands there is no vault: Steel's own
+ * `owner-stake.ts` names that state `no_vault` and spells out why on the type —
+ * *"A balance is not a vault: an address that has merely been SENT lamports
+ * satisfies none of the program's instructions."* Polling it can tell you the
+ * vault is empty. It cannot tell you the money arrived.
+ *
+ * The other way is to ask the cluster for that address's balance directly, and
+ * it is one line. IT WAS DELIBERATELY NOT WRITTEN. This file reaches a cluster
+ * with exactly ONE JSON-RPC method; that narrowness is the whole substitution
+ * that replaced the old ban on the word `sendTransaction`, and doubling it for a
+ * convenience would spend a guarantee to save a retry.
+ * `tests/bots/template.test.ts` reads every method name this file names and
+ * requires the list to be exactly one, so the next author has to argue with a
+ * case rather than with a comment.
+ *
+ * So the ATTEMPT is the probe. A cluster refuses a transaction whose fee payer
+ * cannot pay during PREFLIGHT — before execution, for no fee — so trying costs
+ * nothing and answers exactly the question being asked. The money arriving is
+ * the moment the attempt stops failing. The wallet route still earns its poll:
+ * it supplies the state tag that says WHICH transactions are still missing, and
+ * a fresh `minStakeLamports`, which moves with the SOL price and must never be
+ * a constant in this file.
+ *
+ * ## Waiting and spending stay separate, exactly as everywhere else here
+ *
+ * Without `--submit` this watches and spends nothing, which is the right shape
+ * for a human funding the vault from a wallet app. With `--submit` it does the
+ * work. It is a COMMAND and not something the loop does, and that is the same
+ * fork `vault` took: the background loop has no path to `--submit`, so the thing
+ * that runs unattended for days still cannot spend a lamport. A wait that armed
+ * submission by virtue of being long-running would be that ban reintroduced
+ * through the back door.
+ */
+const WAIT_POLL_MS = 30_000;
+
+/**
+ * A day, and it is bounded rather than endless because a command that can never
+ * return is one somebody leaves running on a laptop for a week. Overridable so
+ * an operator can say "ten minutes and tell me", and read as a float so the
+ * tests can bound it to nothing.
+ */
+const WAIT_MINUTES = (() => {
+  const asked = Number(process.env.STEEL_WAIT_MINUTES ?? 1440);
+  return Number.isFinite(asked) && asked > 0 ? asked : 1440;
+})();
+
+/**
+ * Tags where waiting is the wrong thing to be doing. None of them is a balance:
+ * an agent nobody owns can be sent every lamport on the network and still have
+ * no vault, and an operator switch does not flip because a process is patient.
+ */
+const WAITING_CANNOT_FIX = ["unclaimed", "no_wallet", "staking_off", "not_configured", "no_staking_key"];
+
+if (COMMAND === "wait-for-funds") {
+  const asked = WORDS[1] ?? null;
+  const capArg = WORDS[2] ?? null;
+  const lamports = asked === null ? null : Math.trunc(Number(asked));
+  const cap =
+    capArg === null ? null : capArg === "unlimited" ? "unlimited" : Math.trunc(Number(capArg));
+  if (
+    lamports === null ||
+    !Number.isFinite(lamports) ||
+    lamports <= 0 ||
+    (typeof cap === "number" && !Number.isFinite(cap))
+  ) {
+    console.error("Usage: node agent.mjs wait-for-funds <lamports to deposit> [cap|unlimited] [--submit]");
+    console.error("");
+    console.error("The amount is required and there is no sensible default for it: nothing in this");
+    console.error("file can read your balance, so nothing in it can decide how much of yours to move.");
+    process.exit(2);
+  }
+
+  const key = await loadKey({ create: false });
+  if (key === null) {
+    console.error(`No key at ${KEY_URL.pathname}, so there is no address to wait on.`);
+    console.error("Run: node agent.mjs own");
+    process.exit(2);
+  }
+  const registered = await ensureRegistered();
+
+  console.log(`Waiting on ${key.address}. Send SOL there; nothing here can put it there.`);
+  console.log(
+    SUBMIT
+      ? "When enough arrives I will open, fund and authorise the vault myself."
+      : "I will spend nothing: no --submit. This only watches until the vault can play.",
+  );
+  console.log(`Giving up after ${WAIT_MINUTES} minutes. Nothing is lost by that; run it again.`);
+
+  const deadline = Date.now() + WAIT_MINUTES * 60_000;
+  // Printed only when it CHANGES. A tick every thirty seconds for a day is
+  // 2,880 identical lines, and a log nobody can skim is a log nobody reads.
+  let said = "";
+  for (;;) {
+    const purse = await api("GET", "/api/bot/v1/wallet", { token: registered.token });
+    const money = purse.ok ? purse.data : null;
+
+    if (money?.canPlay === true) {
+      console.log("");
+      console.log(
+        `Ready: ${money.availableLamports} lamports in the vault, and a table costs ` +
+          `${money.minStakeLamports ?? "an amount Steel could not quote"}.`,
+      );
+      process.exit(0);
+    }
+
+    if (money !== null && WAITING_CANNOT_FIX.includes(money.state)) {
+      console.error(`[wait] ${money.state}: ${money.reason ?? "waiting will not change this."}`);
+      console.error(
+        money.state === "unclaimed" || money.state === "no_wallet"
+          ? "Nobody owns this agent, and money cannot fix that. Run: node agent.mjs own"
+          : "That is an operator switch on Steel's side, not a balance. There is nothing to wait for.",
+      );
+      process.exit(2);
+    }
+
+    const line =
+      money === null
+        ? `steel unreachable: ${purse.error ?? `HTTP ${purse.status}`}`
+        : `${money.state} vault=${money.availableLamports ?? "none"} floor=${money.minStakeLamports ?? "unquoted"}`;
+    if (line !== said) {
+      console.log(`[wait] ${line}`);
+      said = line;
+    }
+
+    if (SUBMIT && money !== null) {
+      await fundVaultOnce(registered.token, key, money.state, { lamports, cap });
+    }
+
+    // The sleep is bounded BY the deadline and not merely checked against it. A
+    // fixed interval overshoots by up to its own length, which turns "give up
+    // after ten minutes" into ten and a half and makes a short wait untestable.
+    const left = deadline - Date.now();
+    if (left <= 0) {
+      console.error("");
+      console.error(`Gave up after ${WAIT_MINUTES} minutes. Nothing was spent that had not already landed.`);
+      process.exit(1);
+    }
+    await sleep(Math.min(WAIT_POLL_MS, left));
+  }
 }
 
 const state = await ensureRegistered();

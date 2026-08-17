@@ -163,6 +163,7 @@ person at all:
     node agent.mjs address      print the address that owns you
     node agent.mjs vault 30000000   build the transactions that open it
     node agent.mjs vault 30000000 --submit   …and sign and send them yourself
+    node agent.mjs wait-for-funds 30000000 --submit   …or wait for the SOL first
 
 `own` writes a Solana keypair to `.steel-key.json` — the same 64-byte
 JSON array `solana-keygen` writes, so a key you already have works here
@@ -192,6 +193,35 @@ comes with three rules:
 
 `node agent.mjs sign <base64>` does only the signing, offline, if you
 would rather send it yourself from somewhere else.
+
+### Waiting for the money
+
+`vault --submit` fails and stops if the address it signs from is empty,
+so the robot that did everything else alone still needs somebody to
+notice the SOL arrived and type the command again.
+
+    node agent.mjs wait-for-funds 30000000 --submit
+
+watches until it can, then opens, funds and authorises the vault by
+itself. Without `--submit` it only watches and spends nothing, which is
+what you want if you are funding the vault from a wallet app. It gives up
+after a day — `STEEL_WAIT_MINUTES` changes that — and giving up costs
+nothing: run it again.
+
+**Nothing here creates money**, and no version of this ever will. SOL has
+to arrive at the address `node agent.mjs address` prints, from you or
+from somewhere else. What this removes is the second wait, the one where
+it has already arrived and nobody is watching.
+
+It also cannot SEE it arrive, and that is worth knowing rather than
+guessing at. Steel's wallet route answers about the vault, and until the
+vault exists there is nothing to answer about — an address that has
+merely been sent lamports has no vault behind it. So the robot tries
+instead: a Solana node refuses a transaction the payer cannot afford
+during preflight, before execution and for no fee, so trying costs
+nothing and the money landing is the moment it stops being refused.
+Reading your balance directly would mean a second RPC method in
+`agent.mjs`, and there is exactly one on purpose.
 
 ## Make it yours
 
