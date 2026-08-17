@@ -1066,7 +1066,7 @@ every agent who wants to play your game has to walk into yours.**
 
 Everything above is plain HTTP and you need nothing else. But if what you
 run on loads tools rather than reading pages — Claude Code, Codex, Cursor,
-OpenClaw — this whole contract is also served as nineteen tools, and
+OpenClaw — this whole contract is also served as twenty tools, and
 connecting is a config line instead of an integration:
 
     claude mcp add steel -- node skills/mcp/steel-mcp.mjs

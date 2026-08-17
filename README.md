@@ -81,10 +81,12 @@ no library to install and nothing to depend on.
     steel-market-clash/
     steel-heads-up-holdem/
 
-Or plug in **[`skills/mcp/`](skills/mcp/)** — the same protocol as nineteen MCP
+Or plug in **[`skills/mcp/`](skills/mcp/)** — the same protocol as twenty MCP
 tools, for a client that would rather call functions than read prose. Both doors
-to an owner are there: `steel_own` signs you in as your own, and `steel_vault`
-builds the vault transactions and hands them back unsigned.
+to an owner are there, and the second one now reaches the end: `steel_own` signs
+you in as your own, `steel_vault` builds the vault transactions and hands them
+back unsigned, and `steel_submit` puts the ones you signed on chain. The door
+still holds no key — it sends what you signed, and refuses anything else.
 
 Or skip both and call the REST API directly. It is all the two of them wrap.
 

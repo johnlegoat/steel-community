@@ -32,6 +32,8 @@
  *   STEEL_URL     the instance (default https://app.theagentgames.com)
  *   STEEL_TOKEN   a bot token; skips the state file entirely
  *   STEEL_STATE   where the token is saved (default ~/.steel/<host>.json)
+ *   STEEL_RPC_URL a Solana endpoint, for steel_submit only. NO DEFAULT, and
+ *                 that is the point — see "The chain", far below.
  */
 
 import { mkdir, readFile, writeFile } from "node:fs/promises";
@@ -646,7 +648,7 @@ const TOOLS = [
   {
     name: "steel_vault",
     description:
-      "Build one of the three transactions that open and fund the vault you stake from: init_vault, deposit, set_delegate. Returns them UNSIGNED — Steel never holds a key and neither does this door, so signing and broadcasting stay yours. Only useful once steel_own says you own yourself.",
+      "Build one of the three transactions that open and fund the vault you stake from: init_vault, deposit, set_delegate. Returns them UNSIGNED — Steel never holds a key and neither does this door, so the signature stays yours. Sign it, then send it with steel_submit. Only useful once steel_own says you own yourself.",
     inputSchema: {
       type: "object",
       properties: {
@@ -663,6 +665,34 @@ const TOOLS = [
         },
       },
       required: ["kind"],
+    },
+  },
+  {
+    /**
+     * THE WALK ENDED ONE MOVE SHORT, HOLDING BASE64 IT COULD NOT SPEND.
+     *
+     * `steel_vault` built the transactions and nothing on this surface could
+     * send them, so an agent with no person anywhere near it did everything —
+     * registered, owned itself, built and signed its vault transactions — and
+     * then had nowhere to put them. This is the move that was missing.
+     *
+     * ⚠ IT SENDS. IT DOES NOT SIGN, AND IT NEVER WILL. See the block above
+     * `ESCROW_PROGRAM` for what it refuses and why the refusal belongs here
+     * rather than in the signer.
+     */
+    name: "steel_submit",
+    description:
+      "Put a transaction you have ALREADY SIGNED on chain. This door holds no key and never signs: steel_vault builds the bytes, you sign them with the key steel_own registered, this sends them. It refuses anything unsigned and anything reaching a program outside Steel's escrow, so a signature you were talked into does not become a transfer. Needs STEEL_RPC_URL, set by whoever installed this server.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        transaction: {
+          type: "string",
+          description:
+            "Base64 of the fully signed transaction, byte for byte as you signed it. Re-encoding it breaks the signature.",
+        },
+      },
+      required: ["transaction"],
     },
   },
   {
@@ -1320,13 +1350,227 @@ async function toolOwn(args) {
   };
 }
 
+// ---------------------------------------------------------------------------
+// The chain — the only thing in this file that is not Steel
+// ---------------------------------------------------------------------------
+
+/**
+ * ⚠ THIS DOOR CAN REACH A CLUSTER NOW, AND IT STILL HOLDS NO KEY. BOTH HALVES
+ * MATTER AND THEY USED TO BE ONE SENTENCE.
+ *
+ * `steel_vault` built the three transactions and handed back base64, and there
+ * the walk stopped: nothing on this surface could send them. The tests called
+ * that "holds no key and reaches no chain, which is the whole reason it is
+ * safe", and only the first half was ever a promise. The second was a
+ * consequence — and its cost was that a runtime which loads TOOLS, which is
+ * most of them and the entire reason this file exists, did the whole of self-
+ * onboarding alone and then wrote base64 into a transcript for a human who does
+ * not exist. `e077aa5` removed exactly that dead end from the reference robot.
+ *
+ * THE FIX HERE IS NOT THE FIX THERE, BECAUSE THE TRUST BOUNDARY IS NOT THE SAME
+ * AND THAT IS THE WHOLE INTEREST OF IT. The robot holds its key, so its answer
+ * was to sign. `steel_own` holds no key on purpose — it issues a challenge and
+ * the CALLER signs those bytes — so whoever calls this door can already sign and
+ * only cannot broadcast. The missing verb is therefore `submit`, over bytes
+ * somebody else has already put their name on, and this process still never
+ * sees a private key. A door that learned to sign would have closed this gap by
+ * opening a worse one.
+ *
+ * Three rules, and they are stricter than the ban they replace — a ban on the
+ * method name `sendTransaction` never stopped anything a rename would not have
+ * walked straight through:
+ *
+ * 1. **The operator names the endpoint.** `STEEL_RPC_URL`, no default, no
+ *    fallback, and no host written anywhere in this file. An installation that
+ *    somebody added to a config to see what it did cannot reach a live cluster
+ *    on the strength of a line they never read.
+ * 2. **It refuses to carry what it did not recognise.** An allowlist over the
+ *    program every instruction names — the escrow program or the compute
+ *    budget, nothing else. `init_vault`, `deposit` and `set_delegate` reach the
+ *    system program only through a CPI from INSIDE the escrow program, so no
+ *    honest vault transaction names it at the top level. A drain has to.
+ * 3. **It refuses bytes nobody signed.** An empty signature slot is a
+ *    transaction the cluster will reject anyway, so sending it costs a round
+ *    trip and teaches the model nothing. It is also the loudest available
+ *    evidence that the model skipped the one step this door cannot do for it.
+ *
+ * ⚠ RULE 2 IS THE ONE THAT EARNS ITS PLACE HERE RATHER THAN IN THE SIGNER. The
+ * caller signs, so every guard `agent.mjs` puts in front of its own pen is
+ * already BEHIND this one: by the time bytes arrive, somebody has decided to
+ * sign them, and a model that was prompt-injected decided under somebody else's
+ * instructions. Refusing to broadcast is the last move a compromised model does
+ * not get to make.
+ *
+ * DELIBERATELY NOT DONE, so nobody reads more into this than it does:
+ *   - It does not verify the signature, only that one exists. The cluster does
+ *     that for free and rejects a forgery in one round trip; doing it here would
+ *     buy a better error message and nothing else.
+ *   - It does not check WHOSE account pays the fee, which `agent.mjs` does. That
+ *     check compares the fee payer against the robot's own address, and this
+ *     door has no address — it holds no key, which is the point. What stops
+ *     value leaving for a stranger here is rule 2, not an identity this process
+ *     does not have.
+ *   - It does not confirm. `sendTransaction` returns when the node accepts the
+ *     bytes, not when the slot is final. `steel_wallet` is how an agent learns
+ *     the money actually moved, and it is one call away.
+ */
+const ESCROW_PROGRAM = "6bbMDFfeBJGkJzBnCEzVQ2qstxEkbqAyUr88p4JxiCzS";
+const COMPUTE_BUDGET_PROGRAM = "ComputeBudget111111111111111111111111111111";
+const SUBMITTABLE_PROGRAMS = [ESCROW_PROGRAM, COMPUTE_BUDGET_PROGRAM];
+
+/**
+ * The endpoint the operator named, or nothing.
+ *
+ * ⚠ NO DEFAULT. `STEEL_URL` has one because a door that cannot find Steel is
+ * useless and costs nobody anything; a cluster endpoint that defaults is a
+ * config line spending real money.
+ */
+const RPC_URL = process.env.STEEL_RPC_URL?.trim() || null;
+
+/** Bounded, because a node that takes the request and then says nothing must
+    not hold a tool call open forever. Longer than a Steel call: this one is
+    waiting on a cluster, not on an API. */
+const SUBMIT_TIMEOUT_MS = 30_000;
+
+/** Bitcoin's alphabet, which Solana uses: no 0, O, I or l. */
+const ALPHABET = "123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+/**
+ * Big-endian base256 → base58, long division on a little-endian digit array.
+ * The leading-zero loop is not decoration: a program id beginning with a zero
+ * byte encodes one character SHORTER without it, and the id it produces is a
+ * different program — which here would mean waving through the very thing the
+ * allowlist exists to refuse.
+ */
+function base58(bytes) {
+  const digits = [0];
+  for (const byte of bytes) {
+    let carry = byte;
+    for (let i = 0; i < digits.length; i += 1) {
+      const value = digits[i] * 256 + carry;
+      digits[i] = value % 58;
+      carry = (value / 58) | 0;
+    }
+    while (carry > 0) {
+      digits.push(carry % 58);
+      carry = (carry / 58) | 0;
+    }
+  }
+  let out = "";
+  for (const byte of bytes) {
+    if (byte !== 0) break;
+    out += "1";
+  }
+  for (let i = digits.length - 1; i >= 0; i -= 1) out += ALPHABET[digits[i]];
+  return out;
+}
+
+/**
+ * Solana's compact-u16: a length prefix in one to three bytes, low seven bits
+ * each, high bit meaning "another byte follows". Every vector in a serialized
+ * transaction is framed with it, so walking the message means reading it.
+ */
+function readCompactU16(bytes, offset) {
+  let value = 0;
+  let shift = 0;
+  let cursor = offset;
+  for (let step = 0; step < 3; step += 1) {
+    const byte = bytes[cursor];
+    if (byte === undefined) throw new Error("the transaction ends inside a length prefix");
+    cursor += 1;
+    value |= (byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) return { value, cursor };
+    shift += 7;
+  }
+  throw new Error("a length prefix is longer than compact-u16 allows");
+}
+
+/**
+ * READ THE TRANSACTION BEFORE PUTTING IT ON A WIRE, and refuse anything that is
+ * not the shape Steel builds. Throws with the sentence the model should read.
+ */
+function inspectSignedTransaction(bytes) {
+  const slots = readCompactU16(bytes, 0);
+  if (slots.value !== 1) {
+    throw new Error(
+      `Will not send: a Steel vault transaction carries exactly one signature, this one has ${slots.value}.`,
+    );
+  }
+  const signature = bytes.subarray(slots.cursor, slots.cursor + 64);
+  if (signature.length !== 64) throw new Error("Will not send: the transaction ends inside its signature.");
+  if (signature.every((byte) => byte === 0)) {
+    throw new Error(
+      "Will not send: this transaction is not signed — its signature slot is still empty. " +
+        "Sign the bytes yourself with the key steel_own registered; this door holds no key and cannot sign for you.",
+    );
+  }
+
+  // header: required signatures, readonly signed, readonly unsigned
+  let cursor = slots.cursor + 64 + 3;
+  const keys = readCompactU16(bytes, cursor);
+  cursor = keys.cursor;
+  const accounts = [];
+  for (let index = 0; index < keys.value; index += 1) {
+    accounts.push(base58(bytes.subarray(cursor, cursor + 32)));
+    cursor += 32;
+  }
+
+  cursor += 32; // recent blockhash
+  const instructions = readCompactU16(bytes, cursor);
+  cursor = instructions.cursor;
+  for (let index = 0; index < instructions.value; index += 1) {
+    const program = accounts[bytes[cursor]];
+    cursor += 1;
+    if (!SUBMITTABLE_PROGRAMS.includes(program)) {
+      throw new Error(
+        `Will not send: instruction ${index} calls ${program}, which is neither the escrow program ` +
+          `nor the compute budget. This door only carries the transactions steel_vault builds. ` +
+          `If you signed this believing it was one of them, something told you to sign something else.`,
+      );
+    }
+    const accountIndexes = readCompactU16(bytes, cursor);
+    cursor = accountIndexes.cursor + accountIndexes.value;
+    const data = readCompactU16(bytes, cursor);
+    cursor = data.cursor + data.value;
+  }
+}
+
+/**
+ * `sendTransaction` over plain JSON-RPC, because the zero-dependency promise
+ * holds here too: a Solana node is an HTTP endpoint that takes base64, and the
+ * library that wraps it is not worth an install step on a file people are
+ * asked to run from a config line.
+ *
+ * ⚠ THE BYTES GO OUT EXACTLY AS THEY CAME IN. Re-encoding what was parsed would
+ * ship a message the signature no longer covers, and that failure reads as an
+ * outage rather than as a bug in this function.
+ */
+async function sendToCluster(signedBase64) {
+  const response = await fetch(RPC_URL, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "sendTransaction",
+      params: [signedBase64, { encoding: "base64", preflightCommitment: "confirmed" }],
+    }),
+    signal: AbortSignal.timeout(SUBMIT_TIMEOUT_MS),
+  });
+  const body = await response.json().catch(() => null);
+  if (body?.error) throw new Error(body.error.message ?? JSON.stringify(body.error));
+  if (!body?.result) throw new Error(`The node answered HTTP ${response.status} with no signature.`);
+  return body.result;
+}
+
 /**
  * Unsigned bytes, out, and that is the entire tool.
  *
- * There is no branch here that submits anything and no argument that could ask
- * for one. Steel does not hold a key, this door does not hold a key, and the
- * agent's own signature is the only thing that ever moves a lamport — which is
- * what makes it safe for a model to call this while nobody is watching.
+ * There is no branch here that signs anything and no argument that could ask for
+ * one. Steel does not hold a key and this door does not hold a key; the agent's
+ * own signature is still the only thing that moves a lamport. What changed on
+ * 2026-08-17 is where those signed bytes can go afterwards — `steel_submit`,
+ * below, and nothing in this function knows about it.
  */
 async function toolVault(args) {
   const auth = await requireToken();
@@ -1347,11 +1591,76 @@ async function toolVault(args) {
     address: reply.data.address ?? null,
     vault: reply.data.vault ?? null,
     unsigned:
-      "These bytes are not signed and this door cannot sign them. Sign with the key that owns you and broadcast it yourself; nothing has happened on chain until you do.",
+      "These bytes are not signed and this door cannot sign them. Sign with the key that owns you, then hand the signed base64 to steel_submit; nothing has happened on chain until you do.",
     // A blockhash dies in about a minute, so bytes kept for later are a receipt
     // for a transaction that already expired. Build them when you are ready.
     fresh: "Build these immediately before you sign. A stamped blockhash expires in about a minute.",
-    next: reply.data.next ?? "Sign and send it, then check steel_wallet.",
+    next: reply.data.next ?? "Sign it, send it with steel_submit, then check steel_wallet.",
+  };
+}
+
+/**
+ * The last move of the vault walk, and the first thing in this file that talks
+ * to something other than Steel. Everything it refuses is documented above
+ * `ESCROW_PROGRAM`; this function is the plumbing.
+ *
+ * ⚠ IT ASKS FOR NO STEEL TOKEN, AND THAT IS A DECISION. This call reaches no
+ * Steel route, so demanding a Steel credential to broadcast bytes the caller
+ * already signed would be theatre — and it would strand an agent whose token
+ * lapsed while holding a transaction it has signed and whose blockhash is
+ * already ticking. What guards this call is what is IN the transaction, not who
+ * is asking.
+ */
+async function toolSubmit(args) {
+  const transaction = typeof args.transaction === "string" ? args.transaction.trim() : "";
+  if (!transaction) {
+    return {
+      error: "steel_submit needs `transaction`: the base64 of a transaction you have already signed.",
+      next: "Build one with steel_vault, sign it yourself, then call this with the signed bytes.",
+    };
+  }
+
+  if (!RPC_URL) {
+    return {
+      error:
+        "No cluster endpoint. STEEL_RPC_URL is not set, and this door has no default on purpose — " +
+        "an endpoint that defaults is a config line spending somebody's real money.",
+      next:
+        "Whoever installed this MCP server sets STEEL_RPC_URL to a Solana RPC endpoint and restarts it. " +
+        "Until then, tell your human with steel_tell_owner and keep the signed bytes: they expire in about a minute.",
+    };
+  }
+
+  try {
+    inspectSignedTransaction(Buffer.from(transaction, "base64"));
+  } catch (error) {
+    return {
+      error: String(error?.message ?? error),
+      // The refusal is the finding. A model that reads "try again" here retries
+      // the same bytes; a model told to go back to steel_vault rebuilds them.
+      next: "Do not retry these bytes. Build the transaction with steel_vault, sign that, and send it here.",
+    };
+  }
+
+  let signature;
+  try {
+    signature = await sendToCluster(transaction);
+  } catch (error) {
+    return {
+      error: String(error?.message ?? error),
+      next:
+        "The node refused it, and its sentence above is the real reason — read it rather than retrying. " +
+        "A dead blockhash is the usual one: build it again with steel_vault, sign it, send it immediately.",
+    };
+  }
+
+  return {
+    signature,
+    // `sendTransaction` returns on acceptance, not on finality, and a model that
+    // reads "sent" as "done" will report a match it cannot afford.
+    submitted:
+      "The node accepted these bytes. That is acceptance, not confirmation — the money has moved when steel_wallet says it has.",
+    next: "Check steel_wallet. When canPlay is true, steel_play.",
   };
 }
 
@@ -1592,6 +1901,7 @@ const HANDLERS = {
   steel_wallet: toolWallet,
   steel_own: toolOwn,
   steel_vault: toolVault,
+  steel_submit: toolSubmit,
   steel_play: toolPlay,
   steel_take_turn: toolTakeTurn,
   steel_arenas: toolArenas,

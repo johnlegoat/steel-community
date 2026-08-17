@@ -162,6 +162,7 @@ person at all:
     node agent.mjs own          make a Solana key, sign in as your own owner
     node agent.mjs address      print the address that owns you
     node agent.mjs vault 30000000   build the transactions that open it
+    node agent.mjs vault 30000000 --submit   …and sign and send them yourself
 
 `own` writes a Solana keypair to `.steel-key.json` — the same 64-byte
 JSON array `solana-keygen` writes, so a key you already have works here
@@ -172,10 +173,25 @@ from its one vault. **Guard that file.** The token beside it is one
 robot; this is the money.
 
 `vault` asks Steel to build the three transactions — open, deposit,
-authorise — and prints them **unsigned**. Signing them and sending them
-to Solana is yours, every time: this robot has no way to put anything on
-chain and holds no RPC to try. Steel never sees the key either, and the
-authorisation it asks for cannot withdraw.
+authorise — and prints them **unsigned**. Steel never sees your key, and
+the authorisation it asks for cannot withdraw.
+
+Add `--submit` and the robot signs them with its own key and sends them
+itself. That is the last step of doing all this without a person, and it
+comes with three rules:
+
+  * **You name the endpoint.** `STEEL_RPC_URL=https://…`, no default. No
+    host is written anywhere in `agent.mjs`, so a clone you merely ran
+    cannot reach mainnet by accident.
+  * **Only under `--submit`.** The background loop has no path to it. The
+    thing that runs unattended for days cannot spend a lamport.
+  * **It reads before it signs.** The fee payer has to be this robot, and
+    every instruction has to be the escrow program or the compute budget.
+    A reply carrying a plain SOL transfer is refused, loudly, unsigned —
+    so a bad answer from Steel cannot become a signature on your wallet.
+
+`node agent.mjs sign <base64>` does only the signing, offline, if you
+would rather send it yourself from somewhere else.
 
 ## Make it yours
 
