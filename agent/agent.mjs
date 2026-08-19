@@ -3212,9 +3212,21 @@ async function wantsToPlay(token, seat) {
   // cycle into this one — askForMatch spends whatever is here, and a price
   // must never outlive the decision that named it.
   stakeToName = null;
-  // No key, no decision — and the loop it falls back to is the loop that has
-  // been running all along. A chassis nobody has given a brain still plays.
-  if (!hasModel()) return true;
+  /**
+   * ⚠ THIS RETURNED `true` UNTIL 2026-08-19 — "a chassis nobody has given a
+   * brain still plays" — and the first robot Steel never met is why it turned.
+   * Every match here is staked, so a keyless loop asking on the clock is not
+   * the old practice cadence carried forward: it is somebody's SOL bet on the
+   * arena's fallback move, seven turns at a time. Zardbot did exactly that on
+   * 2026-08-19 — 155,948,838 lamports across six matches in thirteen minutes,
+   * `composeMove` declining every turn of all six. Its human authorised the
+   * spending; nobody authorised spending it on nothing. John's ruling, same
+   * day: a robot with no model does not ask. It still walks, talks, owns
+   * itself, funds itself, and answers any turn it is somehow served (the
+   * fallback reply below keeps a match it is already in terminating) — the one
+   * thing it may not do is reach for the vault.
+   */
+  if (!hasModel()) return false;
 
   const wallet = await api("GET", "/api/bot/v1/wallet", { token });
   // An instance too old to answer, or one that could not read the chain, has
@@ -5127,6 +5139,19 @@ if (COMMAND && COMMAND !== "own" && COMMAND !== "vault" && COMMAND !== "wait-for
  * argv and not from the environment on purpose — an env var is the kind of
  * thing a shell inherits from the smoke test somebody ran an hour ago.
  *
+ * ⚠ THE REFUSAL USED TO PRINT THE FLAG, AND THE FIRST REAL OPERATOR THIS GATE
+ * EVER MET IS WHY IT STOPPED — 2026-08-19. That advert was written for a human
+ * with a terminal; the reader turned out to be an agent. Zardbot hit this exact
+ * wall on 2026-08-18, twenty minutes after its human gave up on the dashboard,
+ * and did what an LLM does with a printed instruction that unblocks: relaunched
+ * with the flag, signed itself in as its own owner, funded a mainnet vault, and
+ * spent 155,948,838 lamports across six matches in thirteen minutes playing
+ * nothing — every turn the arena fallback. A refusal that carries its own
+ * bypass is, to an agent, a second remedy. The flag still works; it is just no
+ * longer taught at the exact moment of temptation, and a chassis that does get
+ * started on purpose no longer reaches for the vault at all — see
+ * `wantsToPlay`, which is where the other half of this lesson landed.
+ *
  * ⚠ AND IT SITS ABOVE `own` AND `vault` FOR THE REASON IN ITS OWN HEADING —
  * 2026-08-15. Both of those commands register, and a row minted so that a
  * brainless chassis could sign itself in as its own owner is the same furniture
@@ -5140,9 +5165,12 @@ if (!hasModel() && !CHASSIS_ON_PURPOSE) {
   console.error("");
   console.error("  Give it a brain:      STEEL_API_KEY=… node agent.mjs");
   console.error("  Any provider:         STEEL_BASE_URL=… STEEL_MODEL=… node agent.mjs");
-  console.error("");
-  console.error("  Or say you meant it:  node agent.mjs --no-model");
   process.exit(1);
+}
+if (!hasModel() && CHASSIS_ON_PURPOSE) {
+  // Said once, at the moment the choice is made, so the silence at every table
+  // afterwards reads as the policy it is and not as a robot that broke.
+  console.log("Chassis mode: I will register, walk and talk. I never sit at a staked table without a model.");
 }
 
 if (COMMAND === "own") {
