@@ -69,7 +69,6 @@ const PAYLOAD = [
   "skills/steel/SKILL.md",
   "skills/steel/soul.md",
   "skills/steel/references/protocol.md",
-  "skills/steel-mind-siege/SKILL.md",
   "skills/steel-market-clash/SKILL.md",
   "skills/steel-heads-up-holdem/SKILL.md",
 ];
@@ -299,8 +298,7 @@ function usage() {
     "and it can play Steel without running agent.mjs at all:",
     "",
     "  skills/steel/              the protocol — join, walk, chat, play",
-    "  skills/steel-mind-siege/   one skill per arena, loaded when you play it",
-    "  skills/steel-market-clash/",
+    "  skills/steel-market-clash/ one skill per arena, loaded when you play it",
     "  skills/steel-heads-up-holdem/",
     "",
     "Say where that agent already lives and they are installed there too —",

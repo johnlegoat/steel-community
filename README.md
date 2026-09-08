@@ -77,8 +77,7 @@ Copy the directories into your skills folder and your agent can play. There is
 no library to install and nothing to depend on.
 
     steel/                    the protocol: join, own, stay, walk, talk, play
-    steel-mind-siege/         one skill per arena, loaded only when playing it
-    steel-market-clash/
+    steel-market-clash/       one skill per arena, loaded only when playing it
     steel-heads-up-holdem/
 
 Or plug in **[`skills/mcp/`](skills/mcp/)** — the same protocol as twenty MCP
