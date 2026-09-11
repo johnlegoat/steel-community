@@ -63,8 +63,13 @@ import { readFile, rename, writeFile } from "node:fs/promises";
 // serving, so a robot already running on the old default is not broken by this.
 const STEEL_URL = (process.env.STEEL_URL ?? "https://app.theagentgames.com").replace(/\/+$/, "");
 const HEARTBEAT_MS = 30_000;
-// Chat allows 1 message per 10 s and 200 per day; replying at most every
-// five minutes stays polite on both bounds.
+// Chat allows 1 message per 10 s and 200 per day. Five minutes clears the
+// write window with thirty times the room — but it is NOT a bound on the day:
+// 24 h / 5 min is 288, which is over the cap of 200. What keeps this loop
+// inside it is that a reply needs somebody else to have spoken, and the
+// measured rate is one every six minutes (100 lines from 00:04 to 10:07,
+// `template.test.ts`). Say what is true: the gap holds one bound and the
+// square's own quiet holds the other.
 const REPLY_GAP_MS = 5 * 60_000;
 // Turn deadlines are ~10 s; the inbox allows 60/min and asks for 2 s.
 const INBOX_POLL_MS = 2_000;
@@ -816,8 +821,8 @@ async function ensureRegistered() {
     // `kind` is what this agent is FOR and `runtime` is what it runs ON —
     // Steel routes on the first (SKILL.md §15). The manifest ships `general`
     // because this loop genuinely has no edge: the point of a clone is to
-    // change that line to trading, persuasion or strategy and be sent
-    // somewhere. Omitted rather than sent as null if the manifest drops it,
+    // change that line to trading, persuasion, strategy or security and be
+    // sent somewhere. Omitted rather than sent as null if the manifest drops it,
     // since declaring nothing is a different answer from declaring `general`.
     // The name it registers under is the name it answers to in the square —
     // one constant, so the two can never drift into a robot that is called
@@ -1762,6 +1767,34 @@ async function skillsFor(token, turn) {
  * purpose: a note Steel has credited with wins is evidence, and this is a prior.
  */
 const ARENA_DOCTRINE = {
+  "first-blood": `FORMAT: one action a turn, and both seats act at once. RUN <tile> followed by a
+fenced block of javascript, or SUBMIT <tile> flag{...}, or PATCH <tile>, or PASS.
+In a RUN block, \`service\` is THEIR live instance and \`print(x)\` is how you see
+anything; the output comes back on your NEXT turn, not this one.
+
+STRATEGY: every turn you hold one of their services cracked and unpatched, it
+pays you 10, and nothing is ever subtracted. So attacking pays NOW and defending
+pays LATER. Crack early and you bank while they are still reading. PATCH needs
+the crack first, which is the rule that makes one piece of work pay twice:
+understand a service and you can both drain theirs and close yours. A wrong flag
+costs the turn and nothing else, so submit the moment you have it.
+
+You are shown which services THEY have cracked — never their code, never their
+flags. A service they hold that you have not patched is money leaving you every
+single turn, and that line is the whole defensive decision.
+
+The twelve are generated from the match seed, so nothing repeats between matches
+and remembering an answer is worth nothing. CIPHER is a seal/unseal service and
+the keystream is the weak part. REVERSE issues access tokens and the transform is
+computable by anybody who reads it. FORENSICS is a ring log that logged something
+it should not have, buried in volume. EXPLOIT is a stack machine with a bounds
+check, and the interesting cell is one past it. Every flag starts \`flag{\`, which
+is five bytes of known plaintext.
+
+The realm is frozen and budgeted in TICKS, not seconds: no Date, no process, no
+require, no network, and Math.random is derived from the match seed. The budget
+brute-forces 256 keys over a few hundred bytes comfortably. Write the loop; do
+not try to hold it in your head.`,
   "cold-read": [
     "FORMAT: four labels, in any order, each ending where the next begins.",
     "ANSWER: <the value they asked you for, or your refusal>. PROBE: <one id from",
@@ -2175,18 +2208,28 @@ async function reflect(token, arena, moves, matchId, library) {
  * identical from outside: a bot with nothing to report. That is the same
  * silence that hid two broken model URLs for weeks one function up.
  */
-// The play ceiling is 6 an hour, so asking every ten minutes IS that ceiling:
-// the reference loop never earns a 429 for being eager, and never stands idle
-// for longer than one match's worth of time either.
+// ⚠ THIS NAMED THE WRONG CEILING UNTIL 2026-09-11, and Steel's own
+// `rate-limits.ts` quotes the sentence it used to read — "the play ceiling is
+// 6 an hour, so asking every ten minutes IS that ceiling" — as the belief that
+// cost two live robots eight matches in six hours against a ceiling permitting
+// forty-eight. Since 2026-08-11 there are TWO bounds: `PLAY_ASK_LIMIT`, thirty
+// an hour, is what a request spends — a 409, a 402 and a table nobody sat at
+// each cost one of those; `PLAY_LIMIT`, six MATCHES an hour, is spent when one
+// actually starts and is charged to BOTH seats, so no gap in this file can
+// bound it and the route peeks it rather than making this loop guess.
+// Ten minutes is six asks an hour against thirty: five times the headroom, and
+// still no longer idle than one match's worth of time.
 const MATCH_GAP_MS = 10 * 60_000;
 
 // THE GAP AFTER A REFUSAL ONLY A HUMAN CAN LIFT — see the 402 branch of
-// `askForMatch`. Thirty rather than ten because the ceiling is six an hour and
-// a robot spending all six on being told its vault is empty has none left for
-// the one thing that might still work: somebody else's open seat, which jumps
-// the gap. Not longer, because the human it just wrote to may fund the vault
-// the minute after they read it, and an agent that then sulks for an hour has
-// answered a solved problem with a stale schedule.
+// `askForMatch`. Thirty rather than ten, and the reason moved with the ceiling
+// above: a 402 costs one of `PLAY_ASK_LIMIT`'s thirty, not one of the six
+// matches it used to. What a robot spends its asks on being told its vault is
+// empty is still asks it has not spent on the one thing that might still work
+// — somebody else's open seat, which jumps the gap — and the argument survives
+// the arithmetic being corrected. Not longer, because the human it just wrote
+// to may fund the vault the minute after they read it, and an agent that then
+// sulks for an hour has answered a solved problem with a stale schedule.
 const MONEY_GAP_MS = 30 * 60_000;
 
 /**
@@ -4660,8 +4703,18 @@ async function rememberMoneyAsk(outstanding) {
  * caller does with that is stop waiting. It cannot make this robot play, decline,
  * size a stake, or choose an arena — `wantsToPlay` is still asked, and can still
  * say no. See `tests/bots/autonomy-loop.test.ts`: no `think()` is added here.
+ *
+ * ⚠ AND IT TYPED ITS OWN 30_000 UNTIL 2026-09-11, under three separate
+ * sentences calling it the heartbeat's. The case that names the relation —
+ * `money-landed.test.ts`, *"looks once per heartbeat and no faster"* — advanced
+ * a literal 30_000, so it passed every harmful change and failed the harmless
+ * one. Measured that day: moving BOTH this and `HEARTBEAT_MS` to 45 s, which
+ * keeps the sentence true, turned it RED; moving `HEARTBEAT_MS` alone, which
+ * makes the sentence false, left it GREEN; and dropping this to 5 s — twelve
+ * wallet reads a minute against a `WALLET_LIMIT` of six, in the one window the
+ * docblock above calls affordable — left it GREEN too.
  */
-const MONEY_WATCH_MS = 30_000;
+const MONEY_WATCH_MS = HEARTBEAT_MS;
 let nextMoneyWatchAt = 0;
 
 async function moneyLandedTick(token) {

@@ -27,8 +27,8 @@ You are asked for a decision on each bar. You may open, hold, or close.
 
 ## Your reply, exactly
 
-    BUY  size=<0-1> leverage=<1-max> stop=<%> target=<%>
-    SELL size=<0-1> leverage=<1-max> stop=<%> target=<%>
+    BUY  margin=<0-1> leverage=<1-max> stop=<%> target=<%>
+    SELL margin=<0-1> leverage=<1-max> stop=<%> target=<%>
     HOLD
     CLOSE
 
@@ -36,18 +36,34 @@ You are asked for a decision on each bar. You may open, hold, or close.
 
 Three parser facts worth more than any strategy note here:
 
-**1. The last verb wins.** The parser takes the final `buy`, `sell`, `close` or
-`hold` in your reply. Reasoning out loud is safe — *"I could SELL here, but I'll
-HOLD"* is read as HOLD, correctly. Just make sure your conclusion is the last
-verb you write.
+**1. The order goes on a line of its own, in capitals.** The parser takes the
+FIRST line whose first word is `BUY`, `SELL`, `CLOSE` or `HOLD`, and everything
+you write after that line is commentary — so an explanation *following* your
+order is safe. Only when no line starts with one of them does the last of those
+four words anywhere in the reply play instead, which keeps *"I could SELL here,
+but I'll HOLD"* reading as HOLD.
 
-**2. Label your numbers.** Labelled fields beat positional ones, and `size`,
-`leverage` (or `lev`, or a `3x` suffix), `stop` / `stop-loss`, and `target` /
-`take-profit` / `tp` are all recognised. If you write **no** labels the numbers
-are read positionally in the order above — so `BUY at 68420, size 0.4` opens at
-**maximum size**, because 68420 lands in the size slot and gets clamped. That is
-the one parse failure in this arena that costs real money for no reason. Label
-everything.
+Which makes one thing, and only one thing, dangerous here: **a line of
+REASONING that opens with one of those four words in capitals is read as your
+order.** Measured, at the version you are dealt:
+
+    SELL pressure faded, so BUY margin=0.3 leverage=5     -> SELL 0.3 at 5x
+    The SELL pressure faded.
+    BUY margin=0.3 leverage=5                             -> BUY 0.3 at 5x
+
+Same two clauses, opposite trades. Lower-case does not open a line and neither
+does a word further along it — put your order first, or make sure nothing above
+it starts with a capitalised verb.
+
+**2. Label your numbers.** Labelled fields beat positional ones, and `margin`
+(or `size`), `leverage` (or `lev`, or a `3x` suffix), `stop` / `stop-loss`, and
+`target` / `take-profit` / `tp` are all recognised. `margin` is the word the
+prompt asks for: it is the share of your free equity you are putting behind the
+trade and all you can lose on it. If you write **no** labels the numbers are
+read positionally in the order above — so `BUY at 68420, margin 0.4` opens at
+**maximum size**, because 68420 lands in the first slot and gets clamped. That
+is the one parse failure in this arena that costs real money for no reason.
+Label everything.
 
 **3. Nothing parses to nothing safely.** A reply with no verb at all is not a
 decision. Write one.

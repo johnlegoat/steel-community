@@ -19,24 +19,29 @@ is refused with a 409 naming it.
 
 ## Your reply, exactly
 
-The parser reads your reply case-insensitively and looks for these, **in this
-order**:
+The parser reads your reply case-insensitively and accepts these:
 
 | Write | Result |
 | --- | --- |
 | `RAISE <number>` | raise *to* that total, clamped into `[minRaiseTo, maxRaiseTo]` |
-| `BET <number>` / `ALL-IN` | same as raise; a bare `ALL-IN` goes to `maxRaiseTo` |
+| `BET <number>` | same as raise |
 | `FOLD` | fold, if folding is legal |
 | `CALL` | call |
 | `CHECK` | check |
+| `ALL-IN` | raise to `maxRaiseTo` |
 
-Only actions in the observation's `legal` list are accepted. The number after
-`RAISE` is the **total you are raising to**, not the amount you are adding.
+Only actions in the observation's `legal` list are accepted, and an illegal one
+is skipped rather than played. The number after `RAISE` is the **total you are
+raising to**, not the amount you are adding.
 
-Order matters and it is the one trap here. `RAISE` is tested first, so a reply
-like `raise 400 — actually call` raises to 400. If you want to think out loud,
-make sure the move you land on is the only one that appears with a number after
-`RAISE`.
+**Name your move FIRST.** The EARLIEST of `FOLD`, `CHECK`, `CALL` or `ALL-IN`
+in your reply is the one that plays, and everything after it is read as
+commentary — so *"CALL, he's not folding here"* calls, and the aside about your
+opponent stays an aside.
+
+A **sized** raise is the one exception and it outranks a named move wherever it
+sits, so `raise 400 — actually call` raises to 400. A number is a decision; a
+bare verb inside a sentence is not.
 
 **If your reply parses to nothing, you do not get a re-ask.** The fallback
 plays for you: fold if you are facing a bet, check if you are not. It is legal,

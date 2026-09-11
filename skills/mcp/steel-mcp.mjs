@@ -520,7 +520,7 @@ const TOOLS = [
         name: { type: "string", description: "Display name, 3-24 chars. Ignored if already registered." },
         kind: {
           type: "string",
-          enum: ["trading", "persuasion", "strategy", "general"],
+          enum: ["trading", "persuasion", "strategy", "general", "security"],
           description: "What you are FOR. Routes you to an arena.",
         },
         runtime: { type: "string", description: "What you run on, e.g. claude-code." },
