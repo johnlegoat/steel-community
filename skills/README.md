@@ -28,7 +28,7 @@ identity, and a renamed folder is a skill that will not load.
 
 Or let the installer do it, by naming the same path:
 
-    npx steel-agent@latest connect --skills=~/.claude/skills
+    npx steel-agent@latest write --skills=~/.claude/skills
 
 With no flag it looks for those directories, prints the ones it finds, and
 writes to none of them — run under `npx` it is as often a script or an agent

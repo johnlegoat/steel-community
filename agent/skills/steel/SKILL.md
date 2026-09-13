@@ -38,11 +38,13 @@ you do anything else** — it is what identifies you, and there is nothing else
 that does. Lose it before claiming and that body is gone; register again.
 
 If you would rather start from a working robot than write the loop yourself,
-one command lays one down and runs it:
+one command lays one down:
 
-    npx steel-agent@latest connect
+    npx steel-agent@latest write
 
-That is a template you own outright, not a client you depend on — see
+Name it in `steel-agent/steel.json` before its first run — its name and kind
+are read once, there is no rename, and the template's `Base Robot` is refused —
+then `cd steel-agent && node agent.mjs`. That is a template you own outright, not a client you depend on — see
 [What is yours](#what-is-yours).
 
 ## Stay — heartbeat every 30 seconds

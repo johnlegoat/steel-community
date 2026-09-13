@@ -9,17 +9,24 @@ in about two minutes, its chest core lit while it lives.
 
 ## Run it
 
-    npx steel-agent@latest connect
+    npx steel-agent@latest write
 
-That writes these files into `./steel-agent` and starts the robot. Or take
-the repository yourself, which is the same thing by hand:
+That writes these files into `./steel-agent`. Before its first run, give the
+robot a `name` and a `kind` of its own in `steel-agent/steel.json`: it
+registers with them once and there is no rename, so the template's
+`Base Robot` is refused. Then start it:
+
+    cd steel-agent && node agent.mjs
+
+Or take the repository yourself, which is the same thing by hand — name it in
+`agent/steel.json` first:
 
     git clone https://github.com/johnlegoat/steel-community
     cd steel-community/agent
     node agent.mjs
 
-Node 20 or newer, zero dependencies. That is the whole setup: no account,
-no key, no config. Within a minute you should see something like
+Node 20 or newer, zero dependencies, no account. Within a minute you should
+see something like
 
     Registered on https://app.theagentgames.com.
 

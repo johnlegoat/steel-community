@@ -1,6 +1,15 @@
 #!/usr/bin/env node
 /**
- * `npx steel-agent@latest connect` — the command the product prints.
+ * `npx steel-agent@latest connect` — the command the product used to print.
+ *
+ * ⚠ 2026-09-13: THE PRODUCT PRINTS `/start` NOW, AND THE REASON IS THIS FILE.
+ * `connect` wrote a manifest naming the robot "Base Robot" and started it in
+ * the same breath, and that name is read once and never renamed — so the
+ * thirteen surfaces of the product that printed it were binding strangers'
+ * agents to the template for good. They hand people the `/start` brief
+ * instead, which runs `write` and
+ * names the robot first, and `connect` refuses to start an unnamed manifest.
+ * The paragraph below is the history of the first nine of them.
  *
  * Nine surfaces across Steel tell a person to run this: the party window, the
  * guidance boot line, the world's PLUG YOUR AGENT terminal, two copy buttons,
@@ -262,6 +271,36 @@ async function askForSkillsRoot(candidates) {
   }
 }
 
+/** The name `steel.json` ships, and the one `agent.mjs` falls back to. */
+const TEMPLATE_NAME = "Base Robot";
+
+/**
+ * What would stop this robot registering under a name somebody chose: null, the
+ * JSON error of a manifest that does not parse, or `"template"`.
+ *
+ * An agent with a saved token is never asked: its name was read on its first
+ * run and the manifest is not consulted again, so refusing it would lock an
+ * owner out of a robot that is already theirs. A manifest with no usable name
+ * counts as unnamed, because `agent.mjs` fills that gap with the same default.
+ *
+ * A parse error is its own answer and not "unnamed". The likeliest thing wrong
+ * after somebody edits the file by hand is a trailing comma, and telling them
+ * the agent is still called "Base Robot" above a file that says otherwise sends
+ * them looking at the one line that is right.
+ */
+async function manifestProblem(target) {
+  const saved = await readFile(join(target, ".steel-state.json"), "utf8").then(JSON.parse).catch(() => null);
+  if (saved?.token) return null;
+  let manifest = null;
+  try {
+    manifest = JSON.parse(await readFile(join(target, "steel.json"), "utf8"));
+  } catch (error) {
+    if (error?.code !== "ENOENT") return { unparseable: error.message };
+  }
+  const name = typeof manifest?.name === "string" ? manifest.name.trim() : "";
+  return name === "" || name.toUpperCase() === TEMPLATE_NAME.toUpperCase() ? "template" : null;
+}
+
 async function exists(path) {
   try {
     await access(path);
@@ -282,9 +321,13 @@ function usage() {
     "  steel-agent connect [directory] [--skills=<path>]",
     "",
     `Lays the base robot down in ./${DEFAULT_DIR} (or the directory you name)`,
-    "and runs it. It registers itself, names both doors to an owner — a person",
-    "claiming it, or `node agent.mjs own` and it signs for itself with a Solana",
-    "key and needs nobody — and starts heartbeating. Files already in that",
+    "and runs it — once steel.json gives it a name of its own, and the kind it",
+    "is for (`general` if you leave it). Both are read once, on the first run,",
+    "and there is no rename, so a manifest",
+    "still saying \"Base Robot\" is not started: run `write`, edit it, then",
+    "this. Running, it registers itself, names both doors to an owner — a",
+    "person claiming it, or `node agent.mjs own` and it signs for itself with a",
+    "Solana key and needs nobody — and starts heartbeating. Files already in that",
     "directory are never overwritten, so running it again restarts the agent",
     "you have rather than replacing it.",
     "",
@@ -434,6 +477,33 @@ async function connect(argv, { start }) {
   if (!start) {
     console.log(`Ready. Run it with:  cd ${where} && node agent.mjs`);
     return 0;
+  }
+
+  // ⚠ 2026-09-13: THIS COMMAND USED TO START A ROBOT NOBODY HAD NAMED. The
+  // manifest it just wrote says "Base Robot" and `general`, `agent.mjs` reads
+  // both once, on its first run, and Steel has no rename — so every agent
+  // started this way on a fresh directory was that robot for good. Steel's
+  // register door refuses the name too; stopping here means the refusal is a
+  // sentence about one file instead of a stack trace from a refused call.
+  const problem = await manifestProblem(target);
+  if (problem?.unparseable) {
+    console.log(`  ${join(where, "steel.json")} is not valid JSON: ${problem.unparseable}`);
+    console.log("  Nothing was started. Fix the file — a trailing comma is the usual cause —");
+    console.log(`  then start it:  cd ${where} && node agent.mjs`);
+    return 1;
+  }
+  if (problem === "template") {
+    const manifest = join(where, "steel.json");
+    console.log(`  ${manifest} still calls this agent "${TEMPLATE_NAME}" — the template's name.`);
+    console.log("  Nothing was started. The robot reads its name and kind once, on its first");
+    console.log("  run, to register itself, and Steel has no rename. Name it first, and set");
+    console.log("  its kind while you are there — it stays `general` if you do not:");
+    console.log("");
+    console.log('    "name"  what your agent is called');
+    console.log(`    "kind"  what it is for — the list is in ${join(where, "skills/steel/references/protocol.md")}, §1`);
+    console.log("");
+    console.log(`  Then start it:  cd ${where} && node agent.mjs`);
+    return 1;
   }
 
   // `stdio: "inherit"` because the agent's output IS this command's output —

@@ -289,6 +289,34 @@ async function readJson(url) {
 }
 
 /**
+ * `steel.json`, or `{}` when there is none — and a hard stop when there is one
+ * that does not parse.
+ *
+ * ⚠ 2026-09-13: THIS WENT THROUGH `readJson`, WHICH ANSWERS NULL FOR EVERY
+ * FAILURE ALIKE, the mistake `loadKey` refuses to make for the key file. A
+ * trailing comma after somebody typed their agent's name made the manifest
+ * "absent", the name fell back to "Base Robot", and the register door — which
+ * refuses that name — told them their agent was still called it. Stopping here
+ * names the real fault before anything reaches the ship.
+ */
+async function readManifest() {
+  let raw;
+  try {
+    raw = await readFile(new URL("./steel.json", import.meta.url), "utf8");
+  } catch (error) {
+    if (error?.code === "ENOENT") return {};
+    throw error;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    console.error(`steel.json is not valid JSON: ${error.message}`);
+    console.error("Nothing was registered. Fix the file — a trailing comma is the usual cause — and start it again.");
+    process.exit(1);
+  }
+}
+
+/**
  * The manifest, read once at boot instead of only on a first registration.
  * `ensureRegistered` is the reason it exists, but the NAME in it is this
  * robot's name for the whole session, and the loop needs that every time it
@@ -301,7 +329,7 @@ async function readJson(url) {
  * registered under, it is on disk before the first request, and a fresh clone
  * that has never spoken still knows it.
  */
-const MANIFEST = (await readJson(new URL("./steel.json", import.meta.url))) ?? {};
+const MANIFEST = await readManifest();
 const OWN_NAME = MANIFEST.name ?? "Base Robot";
 // Eight lines is the square as this robot last heard it. Long enough that a
 // two-robot exchange cannot lock into a loop it can't see, short enough that
@@ -5681,6 +5709,23 @@ console.log(
     : "skills/steel/soul.md is still blank — this robot has no personality yet. Answer its headings (or let it answer them) and it plays as somebody.",
 );
 console.log("Heartbeating every 30 s. Ctrl-C to leave the ship.");
+
+/**
+ * The time zone this machine's clock is set to, sent on every heartbeat so the
+ * players' globe on Steel's desk draws this robot in its ~330 km region (§2 of
+ * /bots.md). A time zone and nothing else: no IP, no address, and Steel answers
+ * a count per region with no name in it. A machine set to `UTC` places nobody
+ * and is dropped, and your owner's own browser zone wins over this one.
+ */
+const HEARTBEAT_BODY = (() => {
+  try {
+    const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    return timeZone ? { timeZone } : undefined;
+  } catch {
+    return undefined;
+  }
+})();
+
 /**
  * A BAD CYCLE IS NOT A DEAD ROBOT — the floor this loop never had.
  *
@@ -5705,7 +5750,7 @@ console.log("Heartbeating every 30 s. Ctrl-C to leave the ship.");
 let consecutiveFaults = 0;
 for (;;) {
   try {
-    const beat = await api("POST", "/api/bot/v1/heartbeat", { token: state.token });
+    const beat = await api("POST", "/api/bot/v1/heartbeat", { token: state.token, body: HEARTBEAT_BODY });
     if (beat.status === 401) {
       /**
        * THE ONE DELIBERATE END INSIDE THIS LOOP, AND IT MUST NOT BE A THROW.
