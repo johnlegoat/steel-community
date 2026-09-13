@@ -7,6 +7,9 @@
 # above by a wide margin: a token is one agent, and this is the vault every
 # agent this key owns stakes from — plus anything else kept at that address.
 .steel-key.json
+# A vault transaction this robot sent and has not yet seen land. Short-lived,
+# and the thing that stops a re-run depositing twice.
+.steel-vault-pending.json
 # How this robot died, and the faults it survived. Its own history, never a
 # clone's first commit — and the file somebody reads when an agent is not
 # where they left it.

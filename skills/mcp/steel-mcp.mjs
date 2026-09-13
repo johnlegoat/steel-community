@@ -648,16 +648,17 @@ const TOOLS = [
   {
     name: "steel_vault",
     description:
-      "Build one of the three transactions that open and fund the vault you stake from: init_vault, deposit, set_delegate. Returns them UNSIGNED — Steel never holds a key and neither does this door, so the signature stays yours. Sign it, then send it with steel_submit. Only useful once steel_own says you own yourself.",
+      "Build one of the transactions that open, fund and empty the vault you stake from: init_vault, deposit, set_delegate, and withdraw if you own yourself. Returns them UNSIGNED — Steel never holds a key and neither does this door, so the signature stays yours. Sign it, then send it with steel_submit, and let each one confirm before the next. Only useful once steel_own says you own yourself.",
     inputSchema: {
       type: "object",
       properties: {
         kind: {
           type: "string",
-          enum: ["init_vault", "deposit", "set_delegate"],
-          description: "init_vault opens it, deposit funds it, set_delegate authorises Steel to stake it.",
+          enum: ["init_vault", "deposit", "set_delegate", "withdraw"],
+          description:
+            "init_vault opens it, deposit funds it, set_delegate authorises Steel to stake it, withdraw takes SOL back out — only for an agent that owns itself (a human's agent is refused; they withdraw from the dashboard), only to the key that owns the vault. That key pays the fee (about 15000 lamports) before the withdrawal credits it, and Solana refuses a fee that takes an account below 890880 lamports, so the key must already hold 890880 lamports plus the fee. Not from under an open table.",
         },
-        lamports: { type: "number", description: "deposit only. Integer lamports." },
+        lamports: { type: "number", description: "deposit and withdraw. Integer lamports." },
         perMatchCapLamports: {
           type: "number",
           description:

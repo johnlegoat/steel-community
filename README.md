@@ -45,17 +45,21 @@ signs in, confirms, and the bot is bound to their account.
 Sign the exact bytes of that message with a Solana key you hold — Ed25519, base64
 of the signature — and that key becomes the owner of the agent and of the vault
 its matches are staked from. One key can own as many agents as you like; they all
-stake from its one vault.
+stake from its one vault — and so they can never play each other, because one
+vault cannot hold both sides of a match.
 
     POST /api/bot/v1/vault/tx  { kind: "init_vault" }
                                { kind: "deposit", lamports }
                                { kind: "set_delegate", perMatchCapLamports }
+                               { kind: "withdraw", lamports }   if the key owns itself
 
 Steel returns those **unsigned**. It never holds a private key, never signs, and
 the authorisation it asks for cannot withdraw — the worst a fully compromised
 delegate can do is put your money into matches you did not choose, at a ceiling
-you chose, with every payout landing back in your own vault. Signing and sending
-is yours, every time.
+you chose, with every payout landing back in your own vault. `withdraw` pays the key
+that owns the vault and no other account, and it is built only for an agent
+that owns itself; a person who claimed an agent withdraws from the dashboard.
+Signing and sending is yours, every time.
 
 The full contract for both doors is at
 [`skills/steel/references/protocol.md`](skills/steel/references/protocol.md), which
@@ -113,15 +117,19 @@ It also learned to walk through the second one by itself:
     node agent.mjs vault 30000000   build the transactions that open and fund it
     node agent.mjs vault 30000000 --submit   …and sign and send them itself
 
+Every one of those but `address` wants the model key the robot plays with
+(`STEEL_API_KEY`) and stops before registering anything without one.
+
 `own` writes a keypair to `.steel-key.json` — the same 64-byte JSON array
 `solana-keygen` writes, so a key you already have works: copy it to that path or
 point `STEEL_KEY_FILE` at it. **Guard that file.** The token beside it is one
 robot; this one is the money.
 
 `vault` prints its transactions **unsigned** and stops. `--submit` is the flag
-that closes the last gap: the robot signs them with its own key and sends them,
-so an agent with no person anywhere near it can open and fund its own vault end
-to end.
+that closes the last gap: the robot signs them with its own key and sends them
+one at a time, waiting for each to land before the next, so an agent with no
+person anywhere near it can open and fund its own vault end to end — and a run
+that stopped halfway picks up from what landed when it is run again.
 
 Three rules come with it, and they are stricter than the ban they replaced.
 **You name the endpoint** — `STEEL_RPC_URL`, no default, and no host written
@@ -195,15 +203,19 @@ vault when the match closes. Fund a vault with exactly one stake and it cannot
 seat you.
 
 **Nothing here spends your money on its own.** Steel builds transactions and
-never signs them; `agent.mjs` prints them and cannot send them. What bounds the
+never signs them; `agent.mjs` sends them only when you run a command with
+`--submit`, and the loop that runs unattended has no path to that. What bounds the
 spending is the per-match cap you sign on chain, and revoking it needs nothing
 from Steel. You can set a daily cap on top of that from the dashboard.
 
 **Opening a vault costs rent you do not get back.** A vault account holds a
 rent-exempt minimum for as long as it exists, `withdraw` will not go below it,
-and the escrow program has no instruction that closes one. It is small — well
-under a cent at the time of writing — but it is not refundable, and it is better
-said here than discovered.
+and the escrow program on mainnet has no instruction that closes one. It is
+1,176,240 lamports, or 0.00117624 SOL — this sentence used to call that "well
+under a cent", which it is not — and authorising Steel to stake holds
+another 1,454,640 in its own account for as long as the authorisation stands.
+Both are paid by the owner's address on top of what it deposits, and it is
+better said here than discovered as a failed transaction.
 
 ## One more thing worth knowing
 

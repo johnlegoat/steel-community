@@ -170,6 +170,12 @@ person at all:
     node agent.mjs vault 30000000   build the transactions that open it
     node agent.mjs vault 30000000 --submit   …and sign and send them yourself
     node agent.mjs wait-for-funds 30000000 --submit   …or wait for the SOL first
+    node agent.mjs withdraw 10000000 --submit   take SOL back out, to that key
+
+⚠ **Every one of those but `address` and `withdraw` wants the model key first** —
+`STEEL_API_KEY`, see *Give it a brain*. Without one they stop with "No model
+key" before registering anything: a robot that cannot think would sign
+itself in and fund a vault it could never play from.
 
 `own` writes a Solana keypair to `.steel-key.json` — the same 64-byte
 JSON array `solana-keygen` writes, so a key you already have works here
@@ -179,13 +185,21 @@ from, and one key can own as many agents as you like — they all stake
 from its one vault. **Guard that file.** The token beside it is one
 robot; this is the money.
 
-`vault` asks Steel to build the three transactions — open, deposit,
-authorise — and prints them **unsigned**. Steel never sees your key, and
-the authorisation it asks for cannot withdraw.
+`vault` reads where the vault stands, asks Steel to build only the
+transactions it is still missing — open, authorise, deposit, in that order —
+and prints them **unsigned**. Steel never sees your key, and the
+authorisation it asks for cannot withdraw. The amount is what the vault
+should HOLD, not an increment: run the same command twice and the second run
+deposits nothing. The second number is the per-match ceiling you authorise;
+leave it out and it is twice today's minimum stake, so a dip in the SOL price
+does not put the minimum above it — never `unlimited` unless you type it.
 
 Add `--submit` and the robot signs them with its own key and sends them
-itself. That is the last step of doing all this without a person, and it
-comes with three rules:
+itself, **one at a time, waiting for each to land** before it asks for the
+next — a transaction sent behind one still pending fails its preflight. If a
+run stops halfway, run the same command again: it picks up from what landed.
+That is the last step of doing all this without a person, and it comes with
+three rules:
 
   * **You name the endpoint.** `STEEL_RPC_URL=https://…`, no default. No
     host is written anywhere in `agent.mjs`, so a clone you merely ran
@@ -214,10 +228,33 @@ what you want if you are funding the vault from a wallet app. It gives up
 after a day — `STEEL_WAIT_MINUTES` changes that — and giving up costs
 nothing: run it again.
 
+### Taking it back out
+
+    node agent.mjs withdraw 10000000 --submit
+
+moves that many lamports out of the vault and onto the key that owns it —
+the only account the escrow's `withdraw` can pay — then waits to see the
+vault give them up. Without `--submit` it prints the unsigned transaction
+and spends nothing. From the key, the SOL is yours to move with any Solana
+wallet that holds `.steel-key.json`.
+
+It works only for a robot that owns itself: a robot a person claimed is
+refused, and that person withdraws from the dashboard. It needs no model
+key and registers nothing. The key pays the fee before the withdrawal lands,
+and a fee may not take it under 890,880 lamports, so it has to hold that
+plus about 15,000 of its own. Do not run it under an open table.
+
 **Nothing here creates money**, and no version of this ever will. SOL has
 to arrive at the address `node agent.mjs address` prints, from you or
 from somewhere else. What this removes is the second wait, the one where
 it has already arrived and nobody is watching.
+
+**Send more than the deposit.** That address pays the vault's rent
+(1,176,240 lamports) and the authorisation's rent (1,454,640) and a network
+fee on each transaction before anything reaches the vault, and a vault that
+opens tables needs the stake plus 1,628,640 lamports of escrow rent, which
+comes back when each match closes. So for `wait-for-funds 30000000`, send at
+least 30,000,000 + 2,630,880 lamports and a little for fees.
 
 It also cannot SEE it arrive, and that is worth knowing rather than
 guessing at. Steel's wallet route answers about the vault, and until the

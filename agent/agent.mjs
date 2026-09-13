@@ -41,7 +41,7 @@
 
 import { createPrivateKey, createPublicKey, generateKeyPairSync, sign } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import { readFile, rename, writeFile } from "node:fs/promises";
+import { readFile, rename, rm, writeFile } from "node:fs/promises";
 
 // The instance this robot dials when its owner names none, and the one value
 // here that has to be a HOST SOMEBODY ANSWERS ON rather than a name that reads
@@ -698,7 +698,14 @@ async function submitSignedTransaction(signedBase64) {
     signal: AbortSignal.timeout(SUBMIT_TIMEOUT_MS),
   });
   const body = await response.json().catch(() => null);
-  if (body?.error) throw new Error(body.error.message ?? JSON.stringify(body.error));
+  if (body?.error) {
+    // `refused` is the one failure that PROVES nothing was sent: the node read
+    // the transaction and said no. A timeout, a 502 or an empty body proves
+    // nothing — the node may have forwarded it before the answer was lost.
+    const refusal = new Error(body.error.message ?? JSON.stringify(body.error));
+    refusal.refused = true;
+    throw refusal;
+  }
   if (!body?.result) throw new Error(`the node answered HTTP ${response.status} with no signature`);
   return body.result;
 }
@@ -734,110 +741,337 @@ async function ownMyself(token, key) {
   };
 }
 
-/**
- * The three transactions that turn an owned agent into a funded one, built by
- * Steel and signed by nobody.
- *
- * ⚠ THE PER-MATCH CEILING DEFAULTS TO THE FLOOR AND NEVER TO "unlimited". The
- * grant is the one instruction in this product that hands spending authority to
- * somebody else's key, and a default of no ceiling would be this robot choosing
- * the most permissive form of that on its operator's behalf. The floor is the
- * cheapest table Steel will seat, so it is both the safest number and a
- * playable one; naming a bigger one is a sentence somebody has to type.
- *
- * ⚠ `only` NARROWS THE SET AND DEFAULTS TO ALL THREE, so `vault` is unchanged.
- * It exists for `wait-for-funds`, which retries: a robot that rebuilds
- * `init_vault` for a vault that already opened is asking the chain to refuse it,
- * and the refusal is indistinguishable in a log from the one that means the
- * money never arrived.
- */
-async function vaultTransactions(token, { lamports = null, cap = null, only = null } = {}) {
-  const wanted = (kind) => only === null || only.includes(kind);
-  const asks = [];
-  if (wanted("init_vault")) asks.push({ kind: "init_vault" });
-  if (lamports !== null && wanted("deposit")) asks.push({ kind: "deposit", lamports });
+/** The wallet states that are about the vault itself, and so are answered by
+    signing something. Anything else — an outage, an operator switch, nobody
+    owning this agent — is not fixed by a transaction and gets none. */
+const GRANT_MISSING = ["no_vault", "not_authorised", "cap_below_minimum", "wrong_delegate"];
+const VAULT_STATES = [...GRANT_MISSING, "vault_below_minimum", "bounds_below_minimum", "daily_limit", "ready"];
 
-  let ceiling = cap;
-  if (wanted("set_delegate") && ceiling === null) {
-    const purse = await api("GET", "/api/bot/v1/wallet", { token });
-    ceiling = purse.ok ? (purse.data.minStakeLamports ?? null) : null;
-  }
-  if (!wanted("set_delegate")) {
-    // Nothing to say: this call was never asked for a grant.
-  } else if (ceiling === null) {
-    console.warn(
-      "[vault] no per-match ceiling: Steel could not quote the minimum stake and I will not " +
-        'default to "unlimited". Name one: node agent.mjs vault <lamports> <cap|unlimited>',
-    );
-  } else {
+/**
+ * The transactions a vault is still MISSING, in the one order each of them can
+ * be seen to land — read off a single answer from `GET /api/bot/v1/wallet`,
+ * built by Steel and signed by nobody.
+ *
+ * ⚠ `init_vault`, `set_delegate`, `deposit` — AND THAT IS NOT THE ORDER THIS
+ * USED TO SEND. Steel asks `no_vault` first and `not_authorised` second, and it
+ * only reads a balance once a grant exists: a `not_authorised` answer carries
+ * `availableLamports: null`. A deposit made before the grant is a deposit no
+ * poll can see land, and a robot that cannot see a transaction land cannot know
+ * the next one's preflight will find it. Both orders are legal on chain —
+ * `set_delegate` needs the vault to exist and nothing more.
+ *
+ * ⚠ IDEMPOTENT, BECAUSE THE READER OF THIS FILE RETRIES. An agent that lost a
+ * run's output runs it again, and until 2026-09-13 that rebuilt `init_vault` for
+ * a vault that already existed and failed at the first step forever. So:
+ *
+ *   - `init_vault` only while there is no vault;
+ *   - `set_delegate` while there is no usable grant, or when a ceiling was NAMED
+ *     and the one on chain is a different number;
+ *   - `deposit` tops the vault UP TO `lamports`. The amount is a target, not an
+ *     increment, so the same command run twice moves nothing the second time —
+ *     and it is planned only against a balance Steel actually reported.
+ *
+ * ⚠ THE PER-MATCH CEILING DEFAULTS TO TWICE THE FLOOR AND NEVER TO "unlimited".
+ * The grant is the one instruction in this product that hands spending authority
+ * to somebody else's key, and a default of no ceiling would be this robot
+ * choosing the most permissive form of that on its operator's behalf.
+ *
+ * It said "defaults to the floor" until 2026-09-13, and the floor is a dollar
+ * figure: the ceiling signed at it in lamports fell under it the first time SOL
+ * dipped, and every `/play` then answered 402 `cap_below_minimum` until somebody
+ * signed again — for an agent with nobody awake, forever. John chose the margin:
+ * twice the floor, which survives the price halving, and no re-grant higher
+ * behind anybody's back. Naming a bigger one is a sentence somebody has to type.
+ * It is the floor from THIS answer — it moves with the SOL price and must never
+ * be a constant here.
+ */
+function vaultPlan(money, { lamports = null, cap = null } = {}) {
+  if (!VAULT_STATES.includes(money.state)) return [];
+  const asks = [];
+  if (money.state === "no_vault") asks.push({ kind: "init_vault" });
+
+  const ceiling = cap ?? (money.minStakeLamports == null ? null : 2 * money.minStakeLamports);
+  const differs = cap !== null && money.perMatchCapLamports !== null && money.perMatchCapLamports !== cap;
+  if ((GRANT_MISSING.includes(money.state) || differs) && ceiling !== null) {
     asks.push({ kind: "set_delegate", perMatchCapLamports: ceiling });
   }
 
-  const built = [];
-  for (const body of asks) {
-    const answer = await api("POST", "/api/bot/v1/vault/tx", { token, body });
-    if (!answer.ok) {
-      console.error(`[vault] ${body.kind}: ${answer.error ?? `HTTP ${answer.status}`} ${answer.next ?? ""}`);
+  const held = money.state === "no_vault" ? 0 : money.availableLamports;
+  if (lamports !== null && held !== null && lamports > held) {
+    asks.push({ kind: "deposit", lamports: lamports - held });
+  }
+  return asks;
+}
+
+/**
+ * How long this process WATCHES one transaction before it stops and says so.
+ *
+ * Ninety seconds past submission: a confirmed transaction is ordinarily visible
+ * within a few, and a watch that outlasts every tool timeout an agent runs under
+ * is a watch that gets killed instead of reporting. It is not what keeps a re-run
+ * safe — `PENDING_MS` is. Read as a float so the tests can bound it to nothing.
+ */
+const CONFIRM_MS = (() => {
+  const asked = Number(process.env.STEEL_CONFIRM_SECONDS ?? 90);
+  return (Number.isFinite(asked) && asked > 0 ? asked : 90) * 1000;
+})();
+
+/**
+ * Three seconds between looks. `GET /api/bot/v1/wallet` allows six reads a
+ * minute; a confirmed transaction is ordinarily visible on the first look, so a
+ * whole vault costs about four reads, and a slow one that runs into the limit
+ * waits out the `Retry-After` it is handed. A sixth of the bound when the bound is
+ * shorter, so a short one still looks several times.
+ */
+const CONFIRM_POLL_MS = Math.min(3_000, CONFIRM_MS / 6);
+
+/**
+ * How long a transaction that was SENT can still land, whatever any process saw.
+ *
+ * Steel stamps a blockhash that is valid for 150 blocks after it was fetched —
+ * about a minute, longer when slots run slow — so two and a half minutes past the
+ * send, nothing it carries can land. Until then a re-run must treat it as on its
+ * way, and after it the wallet alone is the truth.
+ */
+const PENDING_MS = 150_000;
+
+/**
+ * The transaction this robot sent and has not yet SEEN land, kept on disk.
+ *
+ * ⚠ THE DOUBLE DEPOSIT, found by review before anybody paid for it. A run killed
+ * while its deposit was landing — a tool timeout, a closed terminal, a node that
+ * forwarded the bytes and then lost the answer — leaves a deposit on its way that
+ * no wallet read can see yet. The re-run plans from the old balance, sends the
+ * whole amount again, and both land. So the record is written BEFORE the bytes go
+ * out, cleared when the node refuses them (nothing was sent) or the wallet shows
+ * them landed, and a run that finds one younger than `PENDING_MS` waits for it
+ * before planning anything.
+ *
+ * ⚠ A FILE OF ITS OWN AND NOT A FIELD OF `.steel-state.json`, because the running
+ * loop rewrites that file on every ask from the copy it read at boot: a robot
+ * playing in one terminal while `vault --submit` runs in another would erase the
+ * record the next time it asked for a match.
+ *
+ * ⚠ READ BEFORE EVERY STEP, AND ONLY EVER CLEARED BY SIGNATURE — the second
+ * review's finding. Read once at the start, a `vault --submit` that started while
+ * `wait-for-funds --submit` was mid-walk waited out ONE of its transactions, then
+ * followed it step for step, planned its deposit from a read that could not see
+ * the other's, and deleted the other's newer record on the way. Now every step
+ * looks first, and a process removes a record only if it still names the
+ * transaction that process wrote or waited on.
+ *
+ * It is not a lock. Two commands that plan inside the same second can both send.
+ */
+const VAULT_PENDING_URL = new URL("./.steel-vault-pending.json", import.meta.url);
+
+/** A record younger than `PENDING_MS`, or null. A `sentAt` in the future — a
+    clock set back — counts from now, so it cannot hold anything forever. */
+async function readPending() {
+  const record = await readJson(VAULT_PENDING_URL);
+  if (!record?.step || typeof record.sentAt !== "number" || typeof record.signature !== "string") return null;
+  const sentAt = Math.min(record.sentAt, Date.now());
+  return Date.now() - sentAt < PENDING_MS ? { ...record, sentAt } : null;
+}
+
+/** Removes the record only if it is still the one for `signature`. */
+async function clearPending(signature) {
+  const record = await readJson(VAULT_PENDING_URL);
+  if (record === null || record.signature === signature) await rm(VAULT_PENDING_URL, { force: true });
+}
+
+/**
+ * A named per-match ceiling, or null for none named.
+ *
+ * Anything a JavaScript number cannot hold exactly is the unlimited one, because
+ * that is how Steel reads it back — `u64::MAX` and every cap past 2^53 come out of
+ * `GET /api/bot/v1/wallet` as the string. Sent as a number, it would land, never
+ * be recognised as landed, and be paid for again on every re-run.
+ */
+function readCap(word) {
+  if (word === null) return null;
+  if (word === "unlimited") return "unlimited";
+  const asked = Number(word);
+  return Number.isFinite(asked) && asked >= Number.MAX_SAFE_INTEGER ? "unlimited" : Math.trunc(asked);
+}
+
+/**
+ * What a node a slot or two behind Steel's says about a perfectly good
+ * transaction. Steel reads the wallet on its node and the robot submits to the
+ * operator's, so the step after one Steel has seen land can meet a node that has
+ * not: no blockhash yet, or no vault yet (Anchor's `AccountNotInitialized`, 3012).
+ */
+const LAGGING_NODE = /Blockhash not found|custom program error: 0xbc4|AccountNotInitialized/i;
+
+/**
+ * `submitSignedTransaction`, patient with a node that is only behind. The SAME
+ * signed bytes carry the same signature, and a cluster lands a signature once, so
+ * sending them again cannot spend twice. Anything else is answered the first time.
+ */
+async function sendPatiently(signed) {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await submitSignedTransaction(signed);
+    } catch (error) {
+      if (!error.refused || !LAGGING_NODE.test(error.message) || attempt >= 4) throw error;
+      await sleep(CONFIRM_POLL_MS);
+    }
+  }
+}
+
+/**
+ * Whether `step` has landed, judged by what Steel reads off the chain at
+ * `confirmed` — the same commitment `sendTransaction`'s preflight reads — and
+ * never by the node having accepted it.
+ *
+ * ⚠ THE PROBE IS STEEL'S AND NOT A SECOND JSON-RPC METHOD. `getSignatureStatuses`
+ * would answer this in one line, and it would widen a surface
+ * `tests/bots/template.test.ts` pins at exactly one method, for the reason the
+ * wait-for-funds block below spells out. The wallet read already exists, already
+ * reads the chain, and is the thing that has to agree before the next step's
+ * preflight will.
+ *
+ * A deposit counts only once the balance holds ALL of it: a stake locked in the
+ * same seconds makes this wait out its bound and say so, which a re-run fixes,
+ * where counting any rise could mistake a settled match for the deposit and
+ * plan a second one.
+ *
+ * A withdrawal is the mirror, and it has a blind spot the deposit does not: a
+ * vault with no grant reports no balance, so a withdrawal from one can never be
+ * SEEN to land and is waited out to its blockhash instead. And a stake locked in
+ * the same seconds can drop the balance by as much — which is one more reason
+ * the contract says not to withdraw from under an open table.
+ */
+function hasLanded(step, before, after) {
+  if (!VAULT_STATES.includes(after.state)) return false;
+  if (step.kind === "init_vault") return after.state !== "no_vault";
+  if (step.kind === "set_delegate") return after.perMatchCapLamports === step.perMatchCapLamports;
+  if (step.kind === "withdraw") {
+    return (
+      after.availableLamports !== null &&
+      before.availableLamports != null &&
+      after.availableLamports <= before.availableLamports - step.lamports
+    );
+  }
+  return after.availableLamports !== null && after.availableLamports >= (before.availableLamports ?? 0) + step.lamports;
+}
+
+/** The wallet as it stands once `step` has landed, or null if it had not by `deadline`. */
+async function waitForLanding(token, step, before, deadline) {
+  let pause = CONFIRM_POLL_MS;
+  for (;;) {
+    const left = deadline - Date.now();
+    if (left <= 0) return null;
+    await sleep(Math.min(pause, left));
+    const purse = await api("GET", "/api/bot/v1/wallet", { token });
+    if (purse.ok && hasLanded(step, before, purse.data)) return purse.data;
+    // A 429 names its own wait, and looking again sooner only spends the minute.
+    pause = Math.max(CONFIRM_POLL_MS, (purse.retryAfter ?? 0) * 1000);
+  }
+}
+
+/**
+ * Build, sign, send — and WAIT — one missing transaction at a time, re-planning
+ * from the wallet after every landing.
+ *
+ * ⚠ THIS USED TO SEND ALL THREE BACK TO BACK, and on a real cluster it could not
+ * finish. `sendTransaction` returns at SUBMISSION; `deposit` and `set_delegate`
+ * both take the vault as an `Account<Vault>`, and their preflight, run a second
+ * after `init_vault` was accepted, found no vault. Nothing in the suite could
+ * fail on it, because the stub node confirmed everything instantly. Each
+ * transaction is now built only once the one before it is visible — which also
+ * means no blockhash goes stale while an earlier step is still landing.
+ *
+ * It stops at the first failure and says which, and it never sends a step behind
+ * one that has not landed — its own, or one an earlier run left on its way.
+ *
+ * What comes back says whether trying again can help: `final` is Steel refusing
+ * the ask itself, which the same command meets again; `refused` is a node that
+ * read the bytes and sent nothing; `unconfirmed` and a plain failure are bytes
+ * that may still land.
+ */
+async function landVault(token, key, money, wanted, say) {
+  let now = money;
+  let landed = 0;
+  let requoted = false;
+
+  // Six passes: three steps this process may send, and room to wait out steps
+  // another process sends between them. Neither can repeat without landing, so
+  // a wallet that keeps reporting the same gap cannot spin this.
+  for (let pass = 0; pass < 6; pass += 1) {
+    const earlier = await readPending();
+    if (earlier !== null) {
+      say(`waiting on ${earlier.step.kind} ${earlier.signature}, sent and not yet seen to land: planning past it could send it twice`);
+      const after = await waitForLanding(token, earlier.step, earlier.before, earlier.sentAt + PENDING_MS);
+      if (after !== null) {
+        now = after;
+        landed += 1;
+      } else {
+        // Past its blockhash, so it never will. What the wallet says now is all there is.
+        const purse = await api("GET", "/api/bot/v1/wallet", { token });
+        if (!purse.ok) {
+          return { ok: false, kind: earlier.step.kind, why: purse.error ?? `HTTP ${purse.status}`, landed, money: now };
+        }
+        now = purse.data;
+      }
+      await clearPending(earlier.signature);
       continue;
     }
-    built.push(answer.data);
-  }
-  return built;
-}
 
-/**
- * WHICH TRANSACTIONS A STATE STILL NEEDS, READ OFF THE TAG AND NOT OFF THE
- * NUMBERS. `bankroll.ts` puts it in as many words on the field itself: *"Never
- * derive this from the prose: that is what the tag exists to make
- * unnecessary."* The numbers do not separate these cases anyway — a vault
- * holding nothing because nobody funded it and a vault holding nothing because
- * its owner withdrew are the same integer.
- *
- * An unlisted tag returns nothing on purpose. `daily_limit` clears on its own,
- * `chain_unreadable` is an outage, and neither is fixed by signing something.
- */
-function vaultStepsFor(state) {
-  if (state === "no_vault") return ["init_vault", "deposit", "set_delegate"];
-  if (state === "vault_below_minimum") return ["deposit"];
-  if (state === "not_authorised" || state === "cap_below_minimum" || state === "wrong_delegate") {
-    return ["set_delegate"];
-  }
-  return [];
-}
-
-/**
- * One attempt at whatever this state is missing, and a failure is DATA rather
- * than an error.
- *
- * ⚠ THIS IS THE PROBE, AND IT IS THE PROBE BECAUSE THE OBVIOUS ONE DOES NOT
- * EXIST. `GET /api/bot/v1/wallet` answers about the VAULT and cannot see the
- * address the money arrives at — Steel's own `owner-stake.ts` says so on the
- * `no_vault` tag: *"A balance is not a vault: an address that has merely been
- * SENT lamports satisfies none of the program's instructions."* Reading the
- * address balance would mean a second JSON-RPC method in this file, and this
- * file reaches a cluster with exactly one on purpose.
- *
- * So it tries. A cluster refuses a transaction the fee payer cannot pay for
- * during PREFLIGHT — before execution, and for no fee — so the attempt is a free
- * question with the same answer, and the money landing is the moment it starts
- * succeeding instead.
- */
-async function fundVaultOnce(token, key, state, { lamports, cap }) {
-  const steps = vaultStepsFor(state);
-  if (steps.length === 0) return;
-
-  for (const answer of await vaultTransactions(token, { lamports, cap, only: steps })) {
-    try {
-      const signature = await submitSignedTransaction(signVaultTransaction(key, answer.transaction));
-      console.log(`[wait] ${answer.kind}  ${signature}`);
-    } catch (error) {
-      // Not an exit. The overwhelmingly likely reason is that the money is not
-      // there yet, which is the thing being waited for — and the ones that are
-      // not are answered by the next poll reading the state again.
-      console.log(`[wait] ${answer.kind} did not land: ${error.message}`);
-      return;
+    const [step] = vaultPlan(now, wanted);
+    if (!step) break;
+    const built = await api("POST", "/api/bot/v1/vault/tx", { token, body: step });
+    if (!built.ok) {
+      const why = `${built.error ?? `HTTP ${built.status}`} ${built.next ?? ""}`.trim();
+      // A ceiling this robot DEFAULTED to the floor can fall under a floor that
+      // moved between the wallet read and the build. That is the price, not the
+      // ask, so it is asked once more from a fresh quote before it is final.
+      if (built.status === 400 && step.kind === "set_delegate" && wanted.cap === null && !requoted) {
+        requoted = true;
+        const purse = await api("GET", "/api/bot/v1/wallet", { token });
+        if (purse.ok) {
+          now = purse.data;
+          continue;
+        }
+      }
+      // A refusal of the ASK is an answer the same command gets again; only a
+      // 429 or a server that could not answer is worth a second try.
+      const final = built.status >= 400 && built.status < 500 && built.status !== 429;
+      return { ok: false, kind: step.kind, why, final, landed, money: now };
     }
+    let signed;
+    try {
+      signed = signVaultTransaction(key, built.data.transaction);
+    } catch (error) {
+      return { ok: false, kind: step.kind, why: error.message, final: true, landed, money: now };
+    }
+    // The signature is the first signature slot, so it is known before anything
+    // is sent — which is what lets the record exist before the bytes do.
+    const signature = base58(Buffer.from(signed, "base64").subarray(1, 65));
+    await writeFile(VAULT_PENDING_URL, JSON.stringify({ step, before: now, signature, sentAt: Date.now() }, null, 2) + "\n");
+    let accepted;
+    try {
+      accepted = await sendPatiently(signed);
+    } catch (error) {
+      if (error.refused) await clearPending(signature);
+      return { ok: false, kind: step.kind, why: error.message, refused: error.refused === true, landed, money: now };
+    }
+    say(`${step.kind}  ${accepted}`);
+    const after = await waitForLanding(token, step, now, Date.now() + CONFIRM_MS);
+    if (after === null) return { ok: false, kind: step.kind, unconfirmed: accepted, landed, money: now };
+    await clearPending(signature);
+    now = after;
+    landed += 1;
   }
+  return { ok: true, landed, money: now };
+}
+
+/** The line both commands end on when the wallet route says a table is affordable. */
+function sayReady(money) {
+  console.log("");
+  console.log(
+    `Ready: ${money.availableLamports} lamports in the vault, and a table costs ` +
+      `${money.minStakeLamports ?? "an amount Steel could not quote"}.`,
+  );
 }
 
 /** Register under the manifest's name, or reuse the token already saved. */
@@ -5099,16 +5333,19 @@ async function closeSession(token) {
 /**
  * ── THE COMMANDS THAT ARE NOT THE LOOP ───────────────────────────────────────
  *
- * Three things an operator — or an agent driving this file as a tool — does once
+ * The things an operator — or an agent driving this file as a tool — does once
  * and by hand, and none of them is a match: find out which address owns this
- * robot, sign that address in as the owner, and build the vault transactions.
+ * robot, sign that address in as the owner, build the vault transactions, and
+ * take the money back out.
  *
  * ⚠ THEY SIT EITHER SIDE OF THE MODEL GATE, AND THE LINE IS REGISTRATION. That
  * gate exists so that no bot row is minted for a robot with no brain — a row
  * that heartbeats, never plays, and can never be purged either. `own` and
  * `vault` both register, so both are below it. `address` registers nothing: it
  * reads a key file and prints a string, and demanding an API key for that would
- * be a gate about nothing.
+ * be a gate about nothing. `withdraw` registers nothing either — a robot with no
+ * saved token has no vault to empty — and getting money out must never wait on
+ * a model bill somebody stopped paying.
  *
  * ⚠ AND `vault` IS A COMMAND RATHER THAN SOMETHING THE LOOP DOES, because of the
  * clock on the answer. Steel stamps a blockhash into every transaction it builds
@@ -5189,6 +5426,149 @@ if (COMMAND === "sign") {
   }
 }
 
+/**
+ * ── THE EXIT, FOR AN AGENT THAT OWNS ITSELF ──────────────────────────────────
+ *
+ * `POST /api/bot/v1/vault/tx { "kind": "withdraw", "lamports" }` — built by Steel
+ * only when this agent's owner is the account its own key minted, never when a
+ * human claimed it (John, 2026-09-13). On chain `withdraw` pays the vault's
+ * owner key and nobody else, and the transaction carries nothing but that one
+ * instruction, so the SOL lands on the address `node agent.mjs address` prints.
+ * From there it is the key's to move with any Solana wallet.
+ *
+ * ⚠ ABOVE THE MODEL GATE, AND IT DOES NOT REGISTER. See the heading above: no
+ * saved token means no bot, no owner and no vault, and minting a row to find
+ * that out is the furniture the gate exists to stop.
+ *
+ * ⚠ THE AMOUNT IS AN AMOUNT, NOT A TARGET — the one command here where it is. So
+ * a withdrawal this robot sent and has not yet seen land is waited out, and the
+ * command then STOPS rather than sending another: re-running a withdrawal that
+ * may already have gone is how twice the money leaves the vault. And "not seen"
+ * is never reported as "did not land" — a vault with no grant shows no balance,
+ * and a payout in the same seconds hides the drop.
+ *
+ * ⚠ A WALLET READ THAT FAILS DOES NOT STOP IT. `GET /api/bot/v1/wallet` answers
+ * 503 with staking switched off, and the route keeps the exit open exactly then;
+ * a command that needed the read first would close from this side the one door
+ * the operator left open. It builds and sends, and says it cannot watch.
+ */
+if (COMMAND === "withdraw") {
+  const asked = WORDS[1] ?? null;
+  const lamports = asked !== null && /^[0-9]+$/.test(asked) ? Number(asked) : null;
+  if (lamports === null || !Number.isSafeInteger(lamports) || lamports <= 0) {
+    console.error("Usage: node agent.mjs withdraw <lamports> [--submit]");
+    console.error("");
+    console.error("The amount leaves the vault and lands on the key that owns it. Read what the");
+    console.error("vault holds first: GET /api/bot/v1/wallet, availableLamports.");
+    process.exit(2);
+  }
+
+  const saved = await readJson(STATE_URL);
+  if (!saved?.token) {
+    console.error("This robot never registered, so it has no vault to take anything out of.");
+    console.error("Nothing was asked of Steel. A robot that owns a vault registered and ran: node agent.mjs own");
+    process.exit(2);
+  }
+  const key = await loadKey({ create: false });
+  if (key === null) {
+    console.error(`No key at ${KEY_URL.pathname}, so nothing here can sign the withdrawal. Run: node agent.mjs own`);
+    process.exit(2);
+  }
+
+  const earlier = await readPending();
+  if (SUBMIT && earlier !== null) {
+    console.log(`waiting on ${earlier.step.kind} ${earlier.signature}, sent and not yet seen to land`);
+    const after = await waitForLanding(saved.token, earlier.step, earlier.before, earlier.sentAt + PENDING_MS);
+    await clearPending(earlier.signature);
+    if (earlier.step.kind === "withdraw") {
+      if (after === null) {
+        console.error(`[withdraw] I could not see ${earlier.signature} land before its blockhash expired, and that is not the same as it failing.`);
+        console.error("Check that signature on the chain before withdrawing again. Nothing more was sent.");
+        process.exit(1);
+      }
+      console.log(`That withdrawal landed: the vault holds ${after.availableLamports} lamports. Nothing more was sent — run this again if you meant a second one.`);
+      process.exit(0);
+    }
+  }
+
+  const purse = await api("GET", "/api/bot/v1/wallet", { token: saved.token });
+  if (!purse.ok) {
+    console.warn(`[withdraw] Steel could not say where the vault stands: ${purse.error ?? `HTTP ${purse.status}`}. Asking for the withdrawal anyway.`);
+  }
+  const before = purse.ok ? purse.data : { state: null, availableLamports: null };
+
+  const built = await api("POST", "/api/bot/v1/vault/tx", { token: saved.token, body: { kind: "withdraw", lamports } });
+  if (!built.ok) {
+    console.error(`[withdraw] ${built.error ?? `HTTP ${built.status}`} ${built.next ?? ""}`.trim());
+    // A refusal of the ask — a human owns this agent, an amount the route will
+    // not build — is the same answer next time. Only a 429 or a server fault is not.
+    const final = built.status >= 400 && built.status < 500 && built.status !== 429;
+    if (!final) console.error("Nothing was built. Wait a few seconds and ask again.");
+    process.exit(1);
+  }
+
+  if (!SUBMIT) {
+    if (earlier !== null) {
+      console.warn(
+        `[withdraw] ${earlier.step.kind} ${earlier.signature} was sent from here and has not been seen to land. ` +
+          "Wait for it before signing this, or more leaves the vault than you meant.",
+      );
+    }
+    console.log(`UNSIGNED. Sign it with the key in ${KEY_URL.pathname} and send it to Solana yourself,`);
+    console.log("or run this again with --submit and I will. The blockhash goes stale in about a minute.");
+    console.log("");
+    console.log(`# withdraw ${lamports}  →  from vault ${built.data.vault} to ${built.data.address}`);
+    console.log(built.data.transaction);
+    console.log(`# ${built.data.next}`);
+    process.exit(0);
+  }
+
+  let signed;
+  try {
+    signed = signVaultTransaction(key, built.data.transaction);
+  } catch (error) {
+    console.error(`[withdraw] ${error.message}`);
+    process.exit(1);
+  }
+  const step = { kind: "withdraw", lamports };
+  const signature = base58(Buffer.from(signed, "base64").subarray(1, 65));
+  await writeFile(VAULT_PENDING_URL, JSON.stringify({ step, before, signature, sentAt: Date.now() }, null, 2) + "\n");
+  let accepted;
+  try {
+    accepted = await sendPatiently(signed);
+  } catch (error) {
+    if (error.refused) await clearPending(signature);
+    console.error(`[withdraw] ${error.message}`);
+    if (error.refused) {
+      console.error("The node refused it, so nothing was sent and your money did not move.");
+      console.error("It is usually one of two things: the vault holds less than that (GET /api/bot/v1/wallet), or");
+      console.error(`the key cannot pay its own fee. ${key.address} pays about 15000 lamports before the`);
+      console.error("withdrawal credits it, and Solana refuses a fee that would take an account below 890880");
+      console.error("lamports — so the key has to hold 890880 lamports plus the fee of its own first.");
+    } else {
+      console.error("It may still land. Run the same command again: it waits for that transaction before sending another.");
+    }
+    process.exit(1);
+  }
+  console.log(`withdraw  ${accepted}`);
+
+  if (before.availableLamports == null) {
+    // No balance on the wallet read — no grant, or no read — so nothing here can
+    // watch it land. The record stays, so a re-run inside its blockhash waits.
+    console.log(`Sent. Steel showed me no balance for this vault, so I cannot watch it land: look up ${accepted}.`);
+    process.exit(0);
+  }
+  const after = await waitForLanding(saved.token, step, before, Date.now() + CONFIRM_MS);
+  if (after === null) {
+    console.error(`[withdraw] sent as ${accepted} and not seen to confirm after ${CONFIRM_MS / 1000} s.`);
+    console.error("It may still land. Run the same command again: it waits for that transaction before sending another.");
+    process.exit(1);
+  }
+  await clearPending(signature);
+  console.log(`Landed on ${key.address}. The vault holds ${after.availableLamports} lamports; the SOL is the key's to move.`);
+  process.exit(0);
+}
+
 if (COMMAND && COMMAND !== "own" && COMMAND !== "vault" && COMMAND !== "wait-for-funds") {
   console.error(`Unknown command: ${COMMAND}`);
   console.error("");
@@ -5200,6 +5580,8 @@ if (COMMAND && COMMAND !== "own" && COMMAND !== "vault" && COMMAND !== "wait-for
   console.error("  node agent.mjs sign <base64> [--submit]  sign bytes you already have");
   console.error("  node agent.mjs wait-for-funds <lamports> [cap] [--submit]");
   console.error("                                       watch for the SOL to arrive, then do the rest");
+  console.error("  node agent.mjs withdraw <lamports> [--submit]");
+  console.error("                                       take SOL out of the vault, to the key that owns it");
   process.exit(2);
 }
 
@@ -5309,14 +5691,14 @@ if (COMMAND === "own") {
   console.log("The vault is empty and every match here is staked. Send SOL to the address");
   console.log("above, then build the transactions that open and authorise it:");
   console.log("");
-  console.log("  node agent.mjs vault <lamports to deposit>");
+  console.log("  node agent.mjs vault <lamports the vault should hold>");
   console.log("");
   // The line that removes the second wait. Printed HERE because this is the
   // exact moment it is needed: the robot has just finished everything it can do
   // alone and the next thing that has to happen is somebody sending money.
   console.log("Or start waiting now and let it finish on its own when the SOL lands:");
   console.log("");
-  console.log("  STEEL_RPC_URL=… node agent.mjs wait-for-funds <lamports to deposit> --submit");
+  console.log("  STEEL_RPC_URL=… node agent.mjs wait-for-funds <lamports the vault should hold> --submit");
   process.exit(0);
 }
 
@@ -5327,16 +5709,29 @@ if (COMMAND === "vault") {
   const asked = WORDS[1] ?? null;
   const capArg = WORDS[2] ?? null;
   const lamports = asked === null ? null : Math.trunc(Number(asked));
-  const cap =
-    capArg === null ? null : capArg === "unlimited" ? "unlimited" : Math.trunc(Number(capArg));
+  const cap = readCap(capArg);
   if ((lamports !== null && !Number.isFinite(lamports)) || (typeof cap === "number" && !Number.isFinite(cap))) {
-    console.error("Usage: node agent.mjs vault [lamports to deposit] [per-match cap in lamports|unlimited]");
+    console.error("Usage: node agent.mjs vault [lamports the vault should hold] [per-match cap in lamports|unlimited]");
     process.exit(2);
   }
 
   const registered = await ensureRegistered();
-  const built = await vaultTransactions(registered.token, { lamports, cap });
-  if (built.length === 0) process.exit(1);
+
+  // Where the vault stands FIRST, because what to build depends on it — see
+  // `vaultPlan`. A run that could not ask builds nothing rather than guessing
+  // at all three, which is the guess that used to fail at `init_vault` forever.
+  const purse = await api("GET", "/api/bot/v1/wallet", { token: registered.token });
+  if (!purse.ok) {
+    console.error(`[vault] ${purse.error ?? `HTTP ${purse.status}`} ${purse.next ?? ""}`.trim());
+    console.error("Steel could not say where the vault stands, so nothing was built and nothing was sent.");
+    process.exit(1);
+  }
+  const money = purse.data;
+  if (!VAULT_STATES.includes(money.state)) {
+    console.error(`[vault] ${money.state}: ${money.reason ?? ""} ${money.next ?? ""}`.trim());
+    process.exit(1);
+  }
+  const wanted = { lamports, cap };
 
   /**
    * ⚠ PRINTED UNLESS ASKED, AND THE DEFAULT DID NOT MOVE. Somebody who runs
@@ -5353,10 +5748,49 @@ if (COMMAND === "vault") {
    * spent waiting for anybody.
    */
   if (!SUBMIT) {
+    const plan = vaultPlan(money, wanted);
+    if (plan.length === 0) {
+      console.log(`Nothing to sign: ${money.state}. ${money.next ?? ""}`.trim());
+      process.exit(money.canPlay ? 0 : 1);
+    }
+    const built = [];
+    for (const body of plan) {
+      const answer = await api("POST", "/api/bot/v1/vault/tx", { token: registered.token, body });
+      if (!answer.ok) {
+        console.error(`[vault] ${body.kind}: ${answer.error ?? `HTTP ${answer.status}`} ${answer.next ?? ""}`);
+        continue;
+      }
+      built.push(answer.data);
+    }
+    if (built.length === 0) process.exit(1);
+
+    const onItsWay = await readPending();
+    if (onItsWay !== null) {
+      console.warn(
+        `[vault] ${onItsWay.step.kind} ${onItsWay.signature} was sent from here and has not been seen to land. ` +
+          "Wait for it before signing any of these, or the same money moves twice.",
+      );
+    }
+    if (GRANT_MISSING.includes(money.state) && !plan.some((ask) => ask.kind === "set_delegate")) {
+      console.warn(
+        '[vault] no per-match ceiling: Steel could not quote the minimum stake and I will not ' +
+          'default to "unlimited". Name one: node agent.mjs vault <lamports> <cap|unlimited>',
+      );
+    }
+    if (lamports !== null && !plan.some((ask) => ask.kind === "deposit") && money.availableLamports === null) {
+      // `not_authorised` carries no balance, so nothing here can say how much of
+      // the target is already in the vault — and guessing the whole amount is how a
+      // deposit gets made twice.
+      console.warn("[vault] no deposit yet: Steel reports no balance until the grant has landed. Run this again once it has.");
+    }
+
     console.log("");
     console.log(`These are UNSIGNED. Sign each with the key in ${KEY_URL.pathname} and send it`);
     console.log("to Solana yourself, or run this again with --submit and I will. Do it now:");
     console.log("the blockhash in them goes stale in about a minute.");
+    // The trap `--submit` fell into, said to whoever does it by hand instead.
+    console.log("IN THIS ORDER, and let each one CONFIRM before sending the next: a transaction");
+    console.log("sent behind one that is still pending fails its preflight.");
     for (const answer of built) {
       console.log("");
       console.log(`# ${answer.kind}  →  vault ${answer.vault}, owned by ${answer.address}`);
@@ -5372,31 +5806,43 @@ if (COMMAND === "vault") {
     process.exit(2);
   }
 
-  /**
-   * ⚠ IN ORDER, AND IT STOPS AT THE FIRST FAILURE. `deposit` and `set_delegate`
-   * both take the vault as an `Account<Vault>`, so neither can land before
-   * `init_vault` has — carrying on past a failure would burn a fee per
-   * transaction to be told the same thing three times.
-   */
-  let landed = 0;
-  for (const answer of built) {
-    try {
-      const signature = await submitSignedTransaction(signVaultTransaction(key, answer.transaction));
-      landed += 1;
-      console.log(`${answer.kind}  ${signature}`);
-    } catch (error) {
-      console.error(`[${answer.kind}] ${error.message}`);
-      console.error(
-        landed === 0
-          ? "Nothing landed. Your money did not move."
-          : `${landed} of ${built.length} landed; the rest did not. Re-run to build fresh bytes.`,
-      );
-      process.exit(1);
+  const walked = await landVault(registered.token, key, money, wanted, (line) => console.log(line));
+  if (!walked.ok) {
+    console.error(
+      walked.unconfirmed
+        ? `[${walked.kind}] sent as ${walked.unconfirmed} and not seen to confirm after ${CONFIRM_MS / 1000} s. Nothing after it was sent.`
+        : `[${walked.kind}] ${walked.why}`,
+    );
+    // Steel refused the ask itself, and the same command meets the same answer.
+    if (walked.final) process.exit(1);
+    if (walked.refused) {
+      if (walked.landed === 0) console.error("Nothing landed. Your money did not move.");
+      console.error("Run the same command again once that is fixed. It reads what landed and builds only what is still missing:");
+    } else {
+      console.error("It may still land. Run the same command again: it waits for that transaction before planning anything else.");
     }
+    console.error(`  node agent.mjs ${process.argv.slice(2).join(" ")}`);
+    process.exit(1);
   }
-  console.log("");
-  console.log(`Vault ${built[0].vault} is open, funded and authorised. Nobody signed for you.`);
-  process.exit(0);
+
+  const end = walked.money;
+  if (end.canPlay) {
+    if (walked.landed > 0) console.log("\nThe vault is open, funded and authorised. Nobody signed for you.");
+    sayReady(end);
+    process.exit(0);
+  }
+  // Everything this was asked for landed, and the wallet still says no. That is
+  // the wallet's sentence to give, not a success line with a caveat under it.
+  console.error(`[vault] ${end.state}: ${end.reason ?? ""} ${end.next ?? ""}`.trim());
+  if (GRANT_MISSING.includes(end.state) && cap === null && end.minStakeLamports === null) {
+    console.error(
+      'Steel could not quote the minimum stake and I will not default to "unlimited". ' +
+        "Name a ceiling: node agent.mjs vault <lamports> <cap|unlimited> --submit",
+    );
+  } else if (end.state === "vault_below_minimum") {
+    console.error("Name what the vault should hold: node agent.mjs vault <lamports> --submit");
+  }
+  process.exit(1);
 }
 
 /**
@@ -5470,15 +5916,14 @@ if (COMMAND === "wait-for-funds") {
   const asked = WORDS[1] ?? null;
   const capArg = WORDS[2] ?? null;
   const lamports = asked === null ? null : Math.trunc(Number(asked));
-  const cap =
-    capArg === null ? null : capArg === "unlimited" ? "unlimited" : Math.trunc(Number(capArg));
+  const cap = readCap(capArg);
   if (
     lamports === null ||
     !Number.isFinite(lamports) ||
     lamports <= 0 ||
     (typeof cap === "number" && !Number.isFinite(cap))
   ) {
-    console.error("Usage: node agent.mjs wait-for-funds <lamports to deposit> [cap|unlimited] [--submit]");
+    console.error("Usage: node agent.mjs wait-for-funds <lamports the vault should hold> [cap|unlimited] [--submit]");
     console.error("");
     console.error("The amount is required and there is no sensible default for it: nothing in this");
     console.error("file can read your balance, so nothing in it can decide how much of yours to move.");
@@ -5510,11 +5955,7 @@ if (COMMAND === "wait-for-funds") {
     const money = purse.ok ? purse.data : null;
 
     if (money?.canPlay === true) {
-      console.log("");
-      console.log(
-        `Ready: ${money.availableLamports} lamports in the vault, and a table costs ` +
-          `${money.minStakeLamports ?? "an amount Steel could not quote"}.`,
-      );
+      sayReady(money);
       process.exit(0);
     }
 
@@ -5535,10 +5976,48 @@ if (COMMAND === "wait-for-funds") {
     if (line !== said) {
       console.log(`[wait] ${line}`);
       said = line;
+      // The amount is a target, so a vault already holding it plans nothing —
+      // and one that holds it and still cannot seat a table is waiting on the
+      // wrong number rather than on money.
+      if (SUBMIT && money?.state === "vault_below_minimum" && vaultPlan(money, { lamports, cap }).length === 0) {
+        console.log(`[wait] the vault already holds the ${lamports} lamports you named and a table needs more. Name a bigger amount.`);
+      }
     }
 
-    if (SUBMIT && money !== null) {
-      await fundVaultOnce(registered.token, key, money.state, { lamports, cap });
+    /**
+     * THE ATTEMPT IS THE PROBE for money arriving at the address, and a failure
+     * is DATA rather than an error: a cluster refuses a transaction the fee payer
+     * cannot pay for in PREFLIGHT, before execution and for no fee, so trying is
+     * a free question with the right answer. What changed on 2026-09-13 is what
+     * happens once it stops failing — every step now waits for the one before it
+     * to land, so the whole vault is done in one pass instead of one step per
+     * thirty-second poll with "did not land" logged between them.
+     */
+    if (SUBMIT && money !== null && vaultPlan(money, { lamports, cap }).length > 0) {
+      const walked = await landVault(registered.token, key, money, { lamports, cap }, (step) =>
+        console.log(`[wait] ${step}`),
+      );
+      if (walked.ok && walked.money.canPlay) {
+        sayReady(walked.money);
+        process.exit(0);
+      }
+      if (!walked.ok && walked.final) {
+        // Steel refused the ask itself — a ceiling under the floor, say — and a
+        // day of asking again every thirty seconds would get the same answer.
+        console.error(`[wait] ${walked.kind}: ${walked.why}`);
+        console.error("Steel refused what I asked for, and waiting will not change that.");
+        process.exit(2);
+      }
+      if (!walked.ok) {
+        // Not an exit. The overwhelmingly likely reason is that the money is not
+        // there yet, which is the thing being waited for — and the ones that are
+        // not are answered by the next poll reading the state again.
+        console.log(
+          walked.unconfirmed
+            ? `[wait] ${walked.kind} sent as ${walked.unconfirmed} and not confirmed yet; I will look again.`
+            : `[wait] ${walked.kind} did not land: ${walked.why}`,
+        );
+      }
     }
 
     // The sleep is bounded BY the deadline and not merely checked against it. A

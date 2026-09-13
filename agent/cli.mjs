@@ -101,6 +101,9 @@ const GITIGNORE =
   "# above by a wide margin: a token is one agent, and this is the vault every\n" +
   "# agent this key owns stakes from — plus anything else kept at that address.\n" +
   ".steel-key.json\n" +
+  "# A vault transaction this robot sent and has not yet seen land. Short-lived,\n" +
+  "# and the thing that stops a re-run depositing twice.\n" +
+  ".steel-vault-pending.json\n" +
   "# How this robot died, and the faults it survived. Its own history, never a\n" +
   "# clone's first commit — and the file somebody reads when an agent is not\n" +
   "# where they left it.\n" +
