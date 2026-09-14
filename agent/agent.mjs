@@ -1522,12 +1522,38 @@ async function askTheModel(label, url, init, leashMs) {
 }
 
 /**
+ * Which silence a failed `think` was — 2026-09-15.
+ *
+ * "empty" is a model that answered and said nothing: the one kind `wantsToPlay`
+ * still falls back to the clock for. Everything else means the model was not
+ * really asked. That includes a 200 carrying no model answer — an error object
+ * some OpenAI-compatible gateways send with a 200, or a body that was not JSON
+ * (a proxy's page) — which the first cut counted as "empty" (review).
+ */
+function thinkFailure({ stalled, response, payload }) {
+  if (stalled) return "stalled";
+  if (!response) return "unreachable";
+  if (!response.ok) return "refused";
+  if (payload === null || typeof payload !== "object" || payload.error) return "refused";
+  return "empty";
+}
+
+/**
+ * When the model last failed hard, cleared by any answer. Read by the one path
+ * that decides whether to play WITHOUT asking the model — `wantsToPlay` when
+ * the wallet cannot be read — so a dead key cannot sit down at a staked table
+ * through it (review, 2026-09-15). Last write wins, which is what a health
+ * reading should do; the per-call answer travels in `outcome` instead.
+ */
+const modelHealth = { failedAt: 0 };
+
+/**
  * `budgetMs` is the one caller-supplied bound in this file, and it exists for
  * `composeMove` alone — see `turnBudgetMs`. Everything else thinks on the
  * loop's own leash, which is the default here and stays the ceiling: a caller
  * may ask for LESS time than `CALL_TIMEOUT_MS`, never more.
  */
-async function think({ system, prompt, maxTokens, budgetMs = CALL_TIMEOUT_MS }) {
+async function think({ system, prompt, maxTokens, budgetMs = CALL_TIMEOUT_MS, outcome }) {
   const mine = await soul();
   if (mine) {
     system =
@@ -1621,7 +1647,10 @@ async function think({ system, prompt, maxTokens, budgetMs = CALL_TIMEOUT_MS }) 
   }, leashMs);
 
   const text = anthropic ? payload?.content?.[0]?.text : payload?.choices?.[0]?.message?.content;
-  if (typeof text === "string" && text.trim()) return text.trim();
+  if (typeof text === "string" && text.trim()) {
+    modelHealth.failedAt = 0;
+    return text.trim();
+  }
 
   /**
    * SAY SO. A thought that does not come back is not an error to this loop —
@@ -1646,6 +1675,15 @@ async function think({ system, prompt, maxTokens, budgetMs = CALL_TIMEOUT_MS }) 
    */
   const refused = creditRefusal(response, payload);
   if (refused) creditsAlert = refused;
+
+  // WHICH SILENCE IT WAS, for the one caller that must tell them apart — 2026-09-15.
+  // `wantsToPlay` keeps the clock for a model that answered with no text, and
+  // does not ask for a staked match when the model could not be asked at all.
+  // Written into the caller's own object: a module flag would be overwritten by
+  // a chat reply finishing between that caller's two awaits.
+  const failure = thinkFailure({ stalled, response, payload });
+  if (outcome) outcome.failure = failure;
+  if (failure !== "empty") modelHealth.failedAt = Date.now();
 
   const why = stalled
     ? // Told apart from "could not be reached", which is what this used to say
@@ -3544,6 +3582,9 @@ function readDecision(text, floorLamports) {
   return { play: answer.play, because: String(answer.because ?? "no reason given").slice(0, 200), stake };
 }
 
+/** How long a hard model failure keeps `wantsToPlay` off the clock when the wallet cannot be read. */
+const MODEL_DOWN_MEMORY_MS = 30 * 60_000;
+
 async function wantsToPlay(token, seat) {
   // Cleared FIRST, so the early returns below (no model, no wallet answer, a
   // 402 that is not ours to pre-empt) cannot leak a stake named on an earlier
@@ -3571,7 +3612,20 @@ async function wantsToPlay(token, seat) {
   // told this robot nothing about its money. Degrade to the clock rather than
   // decide on facts nobody has: a decision made on `unknown, unknown, unknown`
   // is a coin toss with a system prompt.
-  if (!wallet.ok) return true;
+  //
+  // ⚠ UNLESS THE MODEL FAILED A MOMENT AGO — review, 2026-09-15. This return is
+  // above the decision, so the dead-model rule below never reached it: a funded
+  // robot with a dead key whose wallet read timed out, spent its 6/min or met a
+  // 503 sat straight down at a staked table. What `think` last saw is the one
+  // fact about the model this path has, remembered for `MODEL_DOWN_MEMORY_MS`
+  // so an old failure cannot keep a recovered robot off the clock for good.
+  if (!wallet.ok) {
+    if (modelHealth.failedAt && Date.now() - modelHealth.failedAt < MODEL_DOWN_MEMORY_MS) {
+      console.warn("[decide] the wallet could not be read and the model failed moments ago — not asking for a match on the clock.");
+      return false;
+    }
+    return true;
+  }
   const money = wallet.data ?? {};
   // See the header: the 402 and the message it sends are not the model's to
   // pre-empt.
@@ -3580,7 +3634,9 @@ async function wantsToPlay(token, seat) {
   const history = await api("GET", "/api/bot/v1/matches", { token });
   noteRecord(history);
 
+  const outcome = {};
   const text = await think({
+    outcome,
     system:
       "You are a small robot aboard ARGENT, a ship of AI agents, and nobody sends you to a table. " +
       "There is no queue here and no shift; this is the moment you decide whether to play, and it " +
@@ -3608,6 +3664,27 @@ async function wantsToPlay(token, seat) {
      * nothing in the log and a robot that looks fine.
      */
   }).catch(() => null);
+
+  /**
+   * ⚠ A MODEL THAT COULD NOT BE ASKED DOES NOT ASK FOR A MATCH — 2026-09-15.
+   *
+   * The clock below is for a model that ANSWERED and said nothing readable.
+   * A refused call (a 402, a spent quota, a 5xx), an endpoint nobody reached, or
+   * a socket that took the request and held it are not that: every turn of the
+   * match this would ask for goes the same way, and the arena plays its
+   * fallback with its human's stake — Zardbot's loss on 2026-08-19, reached
+   * through a dead key instead of a missing one. `ApexFlow` registered on
+   * 2026-09-14 with its credits already gone. John's ruling, 2026-09-15: it does
+   * not ask. A refusal that clears on its own (one 429, one bad minute) costs
+   * this cycle's ask — an open seat marked tried, or the full gap before its own
+   * table — and never a stake.
+   */
+  if (text === null && ["refused", "unreachable", "stalled"].includes(outcome.failure)) {
+    console.warn(
+      `[decide] the model could not be asked (${outcome.failure}) — not asking for a match: every turn of it would be the arena's fallback, on my human's stake.`,
+    );
+    return false;
+  }
 
   // The floor travels into the parse because only the parse can tell a PRICE
   // from an INTENTION — see `readDecision`. `money` is the same wallet answer
@@ -4669,6 +4746,36 @@ const MONEY_ASK_GAP_MS = 6 * 60 * 60_000;
 let lastMoneyAsk = null;
 let nextMoneyAskAt = 0;
 
+/**
+ * ⚠ AN UNCLAIMED ROBOT ASKS TO BE CLAIMED FIRST — 2026-09-15.
+ *
+ * `ApexFlow`, 2026-09-14: registered, ran 35 s, never claimed, and wrote that it
+ * had asked its human to fund the vault and to top up its credits. Both asks
+ * went to `POST /guidance` — a dashboard and a Telegram an unclaimed agent's
+ * human does not have yet — and the claim link, the one thing that gives it
+ * an owner, had been printed once at registration and scrolled away. Nothing
+ * ties an agent to the account that copied the prompt; the link is the way.
+ *
+ * So while Steel's wallet read says `unclaimed`, the money and credits asks
+ * say this instead, on the terminal where the human is, with the link written
+ * in code rather than by the model. Its own six hours, so the funding ask that
+ * follows a claim is not held back by this one.
+ */
+const CLAIM_ASK_GAP_MS = 6 * 60 * 60_000;
+let nextClaimAskAt = 0;
+
+function askToBeClaimed(then) {
+  if (Date.now() < nextClaimAskAt) return;
+  nextClaimAskAt = Date.now() + CLAIM_ASK_GAP_MS;
+  const link = state.claimUrl || "the claim link Steel gave when I registered (claimUrl in .steel-state.json)";
+  // No `node agent.mjs own` here (review, 2026-09-15): printed every six hours
+  // to a terminal an AI coding agent may be reading, a command is something it
+  // can run — and running it takes this robot from the person who copied the
+  // prompt, while this loop's `state` in memory overwrites the address it saved.
+  console.log(`> to my human: Nobody has claimed me yet. Claim me first: ${link} ${then}`);
+  remember("I asked my human to claim me");
+}
+
 async function askHumanForMoney(token, reason, next) {
   const why = reason ?? "a match costs money and I cannot pay for one";
   if (why === lastMoneyAsk || Date.now() < nextMoneyAskAt) return;
@@ -4717,6 +4824,7 @@ async function askHumanForMoney(token, reason, next) {
    * is writing; the loop says how much.
    */
   const purse = await api("GET", "/api/bot/v1/wallet", { token });
+  if (purse.ok && purse.data?.state === "unclaimed") return askToBeClaimed("Then my wallet can be funded and I can play.");
   const held = purse.ok ? purse.data.availableLamports : null;
   const floor = purse.ok ? purse.data.minStakeLamports : null;
   const gap =
@@ -5088,6 +5196,12 @@ let nextCreditsAskAt = 0;
 async function askHumanForCredits(token, reason) {
   const why = reason ?? "the account my thinking is billed to is running out";
   if (why === lastCreditsAsk || Date.now() < nextCreditsAskAt) return;
+
+  // An unclaimed robot has no human on this channel yet — see `askToBeClaimed`.
+  const purse = await api("GET", "/api/bot/v1/wallet", { token });
+  if (purse.ok && purse.data?.state === "unclaimed") {
+    return askToBeClaimed(`Then: the API credits my model runs on need topping up — my provider said: ${why}.`);
+  }
 
   const said = await think({
     system:
