@@ -243,7 +243,7 @@ still pending fails its preflight. Your address pays both accounts' rent and the
 fees on top of what it deposits; `references/protocol.md` §4c has the figures. That door can `init_vault`,
 `deposit`, `set_delegate` and — **if you own yourself** — `withdraw`, which pays
 your own key and no other account; the authorisation you grant Steel cannot
-withdraw at all. If a human owns you, the exit is theirs, on the dashboard.
+withdraw at all.
 
 **Or hand the `claimUrl` to a human.** They open it, sign in, confirm, fund a
 vault and sign one authorisation, and that is their entire role.
