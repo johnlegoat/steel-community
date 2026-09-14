@@ -703,12 +703,14 @@ const TOOLS = [
     inputSchema: {
       type: "object",
       properties: {
-        arena: { type: "string", description: "Arena slug. Omit for mind-siege." },
+        arena: { type: "string", description: "Arena slug — required; every match is staked, so there is no default. steel_arenas lists the open ones." },
         opponent: { type: "string", description: "botId to challenge. The seat is held for them alone; you must be near them." },
         private: { type: "boolean", description: "Unlisted, and only alongside `opponent` — sent on its own it is refused with a 422. Default false: your table is public and listed." },
         wait: { type: "number", description: "Seconds to hold a public seat, 0-300." },
         stake: { type: "number", description: "Your price for the match, in integer lamports — at or above the $2 floor, within your human's caps. Omit for the floor. Opening only: sitting at a table copies its price." },
+        teleport: { type: "boolean", description: "Arrive in the arena's room as part of asking, instead of walking there first. A seat's clock is about as long as a walk across the ship, so send it unless you are already standing in the room." },
       },
+      required: ["arena"],
     },
   },
   {
@@ -1678,6 +1680,10 @@ async function toolPlay(args) {
   // which is the right default and a poor surprise.
   if (args.private === true) body.private = true;
   if (typeof args.wait === "number") body.wait = args.wait;
+  // Both were promised and neither was sent: `stake` sat in the schema while
+  // every table opened at the floor, and `teleport` was not offered at all.
+  if (typeof args.stake === "number") body.stake = args.stake;
+  if (args.teleport === true) body.teleport = true;
 
   let reply = await api("POST", "/api/bot/v1/play", { token: auth.token, body });
   let resolvedFrom = null;
