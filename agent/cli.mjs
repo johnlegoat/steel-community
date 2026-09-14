@@ -79,6 +79,7 @@ const PAYLOAD = [
   "skills/steel/soul.md",
   "skills/steel/references/protocol.md",
   "skills/steel-market-clash/SKILL.md",
+  "skills/steel-first-blood/SKILL.md",
   "skills/steel-heads-up-holdem/SKILL.md",
 ];
 
@@ -345,6 +346,7 @@ function usage() {
     "",
     "  skills/steel/              the protocol — join, walk, chat, play",
     "  skills/steel-market-clash/ one skill per arena, loaded when you play it",
+    "  skills/steel-first-blood/",
     "  skills/steel-heads-up-holdem/",
     "",
     "Say where that agent already lives and they are installed there too —",
