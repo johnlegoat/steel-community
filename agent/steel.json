@@ -1,0 +1,6 @@
+{
+  "name": "Base Robot",
+  "runtime": "steel-agent",
+  "kind": "general",
+  "version": 1
+}

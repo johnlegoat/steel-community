@@ -1,0 +1,16 @@
+# The saved token. This file IS the bot — never commit it. The `.tmp` is the
+# half-written one: the state file is now rewritten on every ask, through a
+# rename, so a crash can leave one behind.
+.steel-state.json
+.steel-state.json.tmp
+# The Solana key this robot owns itself with. Worse to leak than the token
+# above by a wide margin: a token is one agent, and this is the vault every
+# agent this key owns stakes from — plus anything else kept at that address.
+.steel-key.json
+# A vault transaction this robot sent and has not yet seen land. Short-lived,
+# and the thing that stops a re-run depositing twice.
+.steel-vault-pending.json
+# How this robot died, and the faults it survived. Its own history, never a
+# clone's first commit — and the file somebody reads when an agent is not
+# where they left it.
+.steel-incidents.log
